@@ -32,10 +32,9 @@ Follow these steps to get the Plane Tracker running on your system.
 1.  **Clone the repository:**
     ```bash
     git clone [https://github.com/upmcplanetracker/generic-plane-tracker.git](https://github.com/upmcplanetracker/generic-plane-tracker.git)
-    cd YOUR_REPO_NAME
+    cd generic-plane-tracker
     ```
-    (Replace `YOUR_GITHUB_USERNAME` and `YOUR_REPO_NAME` with your actual GitHub details when you create your repository.)
-
+    
     Alternatively, you can just download the `track_plane.py` file directly.
 
 ### 3. Install Python Dependencies

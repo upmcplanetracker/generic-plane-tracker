@@ -31,7 +31,7 @@ Follow these steps to get the Plane Tracker running on your system.
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git](https://github.com/YOUR_GITHUB_USERNAME/YOUR_REPO_NAME.git)
+    git clone [https://github.com/upmcplanetracker/generic-plane-tracker.git](https://github.com/upmcplanetracker/generic-plane-tracker.git)
     cd YOUR_REPO_NAME
     ```
     (Replace `YOUR_GITHUB_USERNAME` and `YOUR_REPO_NAME` with your actual GitHub details when you create your repository.)
@@ -69,12 +69,12 @@ It's highly recommended to use a Python virtual environment to manage dependenci
 Create a file named `.env` in the same directory as `track_plane.py`. This file will store your sensitive credentials and configurable parameters.
 
 Replace the placeholder values with your actual information:
-
+```bash
 PLANE_CODE="INSERT_YOUR_PLANE_ICAO_HEX_HERE" # REQUIRED: The ICAO 24-bit hex code of the plane to track (e.g., "ac0f4a"). Find this on flight tracking sites (e.g., ADS-B Exchange, FlightAware, FlightRadar24).
 BLUESKY_HANDLE="your_bluesky_handle.bsky.social" # REQUIRED (if posting to Bluesky): Your full Bluesky handle (e.g., example.bsky.social).
 BLUESKY_APP_PASSWORD="YOUR_BLUESKY_APP_PASSWORD" # REQUIRED (if posting to Bluesky): Your Bluesky App Password. Generate one from your Bluesky settings for security.
 RECIPIENT_EMAIL="your_notification_email@example.com" # REQUIRED (if sending emails): The email address to receive notifications from the script.
-
+```
 --- Optional: Flight Metrics Configuration ---
 These values affect the estimated fuel burn and CO2 emissions.
 If not set, conservative default estimates are used.
@@ -121,19 +121,22 @@ You can run the script manually for testing, but for continuous tracking, it's b
 
 ```bash
 python3 track_plane.py
+```
 Running as a Cron Job (Linux/macOS)
 For continuous monitoring, schedule the script to run periodically (e.g., every 5 minutes).
 
 Open your crontab:
 
-Bash
+```bash
 
 crontab -e
+```
 Add the following line (adjust paths to your script and Python interpreter):
 
 Code snippet
-
+```
 */5 * * * * /usr/bin/python3 /path/to/your/plane_tracker_repo/track_plane.py >> /path/to/your/plane_tracker_repo/plane_tracker_cron.log 2>&1
+```
 Replace /usr/bin/python3 with the correct path to your Python 3 interpreter (you can find it with which python3 or echo $VIRTUAL_ENV/bin/python3 if in an active virtual environment).
 
 Replace /path/to/your/plane_tracker_repo/ with the actual absolute path to the directory where you cloned/downloaded the script.

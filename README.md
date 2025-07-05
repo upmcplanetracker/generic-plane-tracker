@@ -31,7 +31,7 @@ Follow these steps to get the Plane Tracker running on your system.
 
 1.  **Clone the repository:**
     ```bash
-    git clone [https://github.com/upmcplanetracker/generic-plane-tracker.git](https://github.com/upmcplanetracker/generic-plane-tracker.git)
+    git clone https://github.com/upmcplanetracker/generic-plane-tracker.git
     cd generic-plane-tracker
     ```
     

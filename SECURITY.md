@@ -1,4 +1,3 @@
-```markdown
 # Security Policy
 
 ## Reporting a Vulnerability
@@ -46,4 +45,3 @@ We kindly request that you:
 * Do not disrupt or degrade our services during your testing.
 
 Thank you for helping us keep this project secure!
-```

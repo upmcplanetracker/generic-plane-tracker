@@ -66,6 +66,10 @@ It's highly recommended to use a Python virtual environment to manage dependenci
 ### 4. Create the `.env` File
 
 Create a file named `.env` in the same directory as `track_plane.py`. This file will store your sensitive credentials and configurable parameters.
+```bash
+sudo nano .env
+```
+or use another text editor.
 
 Replace the placeholder values with your actual information:
 ```bash
@@ -84,11 +88,12 @@ Find specific aircraft performance data on sites like:
 Look for values like "Fuel Burn per hour" (GPH) and "Cruise Speed" (Knots).
 The formula is (GPH / Knots) = Gallons Per Nautical Mile.
 Example: For an aircraft burning 512 GPH at 487 Knots cruise speed, DEFAULT_FUEL_BURN_GAL_PER_NM would be 512 / 487 = ~1.05
+```env
 DEFAULT_FUEL_BURN_GAL_PER_NM="1.05"
 JET_FUEL_CO2_LBS_PER_GALLON="21.1" # Pounds of CO2 per US gallon of Jet A/A-1 (standard value)
 LBS_PER_METRIC_TON="2204.62" # Pounds per metric ton (standard value)
 CO2_TONS_PER_AVG_CAR_MILE="0.0004" # Approx. tons of CO2 per average car mile (standard value, ~400 grams/km)
-
+```
 **Note:** The `bsky-bridge` library requires an **App Password**, not your regular Bluesky account password. Generate one in your Bluesky settings for security.
 
 ### 5. Configure the Script

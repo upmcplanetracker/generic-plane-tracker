@@ -156,5 +156,4 @@ Bluesky App Password Security: Treat your Bluesky App Password like any other se
 
 Mail Configuration: For email alerts to work, your system's mail command must be properly configured to send external emails. This often involves setting up a Mail Transfer Agent (MTA) like Postfix or configuring a simpler SMTP client (e.g., ssmtp). This is a system-level setup, not specific to this Python script.
 
-Contributing
-Feel free to open issues or submit pull requests if you have improvements or bug fixes!
+Contributing: Feel free to open issues or submit pull requests if you have improvements or bug fixes!

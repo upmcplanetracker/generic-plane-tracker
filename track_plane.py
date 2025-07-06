@@ -17,9 +17,9 @@ load_dotenv()
 
 # --- Configuration ---
 PLANE_CODE = os.getenv("PLANE_CODE")  # ICAO hex of the plane to monitor, loaded from .env
-BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE") 
-BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD") 
-RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL") 
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE") # Your Bluesky handle (e.g., yourname.bsky.social)
+BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD") # Your Bluesky App Password (generate from Bluesky settings)
+RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL") # The email address to send notifications to
 
 # API Endpoints
 ADSB_LOL_API_URL = "https://api.adsb.lol/v2/hex/{icao_hex}"
@@ -37,7 +37,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Define the state file and log file paths relative to the script's location
 STATE_FILE = os.path.join(SCRIPT_DIR, "plane_state.txt")
 LOG_FILE = os.path.join(SCRIPT_DIR, "plane_tracker.log")
-LOG_RETENTION_HOURS = 6 # NEW: Keep logs for the last 6 hours
+LOG_RETENTION_HOURS = 6 # Keep logs for the last 6 hours
 
 RETRY_COUNT = 2
 RETRY_DELAY = 2
@@ -391,13 +391,15 @@ def set_current_state(state: str, latitude: float = None, longitude: float = Non
         timestamp = datetime.datetime.now(pytz.UTC).timestamp()
 
     with open(STATE_FILE, "w") as f:
-        f.write(f"{state}\n")
         f.write(f"{latitude if latitude is not None else ''}\n")
         f.write(f"{longitude if longitude is not None else ''}\n")
         f.write(f"{timestamp}\n")
         f.write(f"{takeoff_location_name if takeoff_location_name is not None else ''}\n")
-        f.write(f"{last_idle_notification_time}\n") # Store the timestamp
+        f.write(f"{last_idle_notification_time}\n") 
+        # Add state to the end to ensure it's written last in case of crash
+        f.write(f"{state}\n") 
     log_message(f"State updated to: {state} (Lat: {latitude}, Lon: {longitude}, Takeoff Loc: {takeoff_location_name}, Last Idle Notif Time: {datetime.datetime.fromtimestamp(last_idle_notification_time, tz=pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC') if last_idle_notification_time else 'N/A'})")
+
 
 # --- Aircraft Info Helper ---
 def get_aircraft_display_name(plane_data: dict) -> str:
@@ -494,7 +496,7 @@ def calculate_flight_metrics(lat1: float, lon1: float, lat2: float, lon2: float)
 
     distance_nm = EARTH_RADIUS_NM * c
 
-    fuel_gallons = distance_nm * DEFAULT_FUEL_BURN_GAL_PER_NM # Using configurable fuel burn rate
+    fuel_gallons = distance_nm * DEFAULT_FUEL_BURN_GAL_PER_NM 
     co2_lbs = fuel_gallons * JET_FUEL_CO2_LBS_PER_GALLON
     co2_tons = co2_lbs / LBS_PER_METRIC_TON
 
@@ -632,176 +634,204 @@ def main(spoof_data: dict = None, test_mode: bool = False):
             if last_idle_notification_time == 0 or time_since_last_idle_notification >= IDLE_NOTIFICATION_THRESHOLD_SECONDS:
                 log_message(f"Plane has been idle for over {IDLE_NOTIFICATION_THRESHOLD_HOURS} hours since last notification or no notification sent yet. Sending notification.")
 
-                idle_location_name = get_location_name(last_lat, last_lon)
-                # Ensure coordinates are not None before formatting
-                idle_coordinates = f"{last_lat:.4f}, {last_lon:.4f}" if last_lat is not None and last_lon is not None else "N/A"
+                # Determine the location for the idle post
+                location_for_idle_post = "an unknown location"
+                coordinates_for_idle_post = "N/A"
+                location_note = ""
 
-                current_utc_str, current_local_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon)
+                if last_lat is not None and last_lon is not None:
+                    # If we have last known coordinates from the state file, use them for geocoding
+                    geocoded_name = get_location_name(last_lat, last_lon)
+                    coordinates_for_idle_post = f"{last_lat:.4f}, {last_lon:.4f}"
+                    
+                    if "unknown location" in geocoded_name:
+                        # Geocoding failed or returned generic unknown, use last_takeoff_location if available
+                        if last_takeoff_location:
+                            location_for_idle_post = last_takeoff_location
+                            location_note = f" (current location unknown from tracking data, likely still near {last_takeoff_location})."
+                        else:
+                            location_for_idle_post = geocoded_name # Keep the "unknown location" from geocoding
+                            location_note = " (current location unknown from tracking data)."
+                    else: # Geocoding was successful from cached coords
+                        location_for_idle_post = geocoded_name
+                        location_note = ""
+                elif last_takeoff_location: # If no last_lat/lon but we have a takeoff location name
+                    location_for_idle_post = last_takeoff_location
+                    location_note = f" (current location unknown, likely still near where it last took off from: {last_takeoff_location})."
+                else:
+                    # Truly unknown location, no last lat/lon or takeoff location stored
+                    location_for_idle_post = "an unknown location"
+                    location_note = " (current location unknown)."
+
+                current_utc_str, current_local_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon) # Use last_lat/lon for timezone
 
                 msg_idle = (
                     f"The {aircraft_name} (ICAO: {PLANE_CODE}) still appears to be on the ground "
-                    f"at {idle_location_name} (GPS: {idle_coordinates}).\n"
+                    f"at {location_for_idle_post}{location_note}\n"
+                    f"GPS: {coordinates_for_idle_post}\n"
                     f"Time checked: {current_local_str} (UTC: {current_utc_str.split('UTC')[0].strip()}).\n"
                     f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
                 )
                 post_to_bluesky(msg_idle, test_mode=test_mode)
 
                 # Update the last_idle_notification_time to the current timestamp
+                # lat/lon are not updated here as we don't have fresh data, so we keep the old ones in the state file
                 set_current_state("landed", last_lat, last_lon, last_change_time, takeoff_location_name=last_takeoff_location, last_idle_notification_time=current_time_timestamp)
             else:
                 log_message("No plane data, and plane was already landed, but not yet time for another idle notification.")
-        return
+        return 
 
     # If we reach here, plane_data IS available
-    alt = plane_data.get("alt_baro")
-    gnd = plane_data.get("gnd")
-    gs = plane_data.get("gs")
-    lat = plane_data.get("lat")
-    lon = plane_data.get("lon")
+    else: # This 'else' should be at the same indentation level as 'if not plane_data:'
+        alt = plane_data.get("alt_baro")
+        gnd = plane_data.get("gnd")
+        gs = plane_data.get("gs")
+        lat = plane_data.get("lat")
+        lon = plane_data.get("lon")
 
-    is_flying = False
-    if (alt is not None and isinstance(alt, (int, float)) and alt > ALTITUDE_THRESHOLD and (gnd is False or gnd is None)) or \
-       (gs is not None and isinstance(gs, (int, float)) and gs > GROUND_SPEED_THRESHOLD and (gnd is False or gnd is None)):
-        is_flying = True
+        is_flying = False
+        if (alt is not None and isinstance(alt, (int, float)) and alt > ALTITUDE_THRESHOLD and (gnd is False or gnd is None)) or \
+           (gs is not None and isinstance(gs, (int, float)) and gs > GROUND_SPEED_THRESHOLD and (gnd is False or gnd is None)):
+            is_flying = True
 
-    log_message(f"API data: alt_baro={alt}, gnd={gnd}, gs={gs}, lat={lat}, lon={lon}")
-    log_message(f"Detected is_flying={is_flying}")
+        log_message(f"API data: alt_baro={alt}, gnd={gnd}, gs={gs}, lat={lat}, lon={lon}")
+        log_message(f"Detected is_flying={is_flying}")
 
-    if time_since_last_change < MIN_STATE_CHANGE_TIME and not test_mode:
-        log_message(f"Minimum time threshold not met ({MIN_STATE_CHANGE_TIME}s). Skipping state change.")
-        # Preserve takeoff_location and last_idle_notification_time status
-        set_current_state(current_state, lat, lon, last_change_time, takeoff_location_name=last_takeoff_location, last_idle_notification_time=last_idle_notification_time)
-        return
-
-    # Logic for state transitions (when data IS available)
-    if is_flying and current_state == "landed":
-        # Plane just took off - reset last_idle_notification_time
-        takeoff_location = get_location_name(last_lat, last_lon) 
-        # Ensure coordinates are not None before formatting
-        takeoff_coordinates = f"{last_lat:.4f}, {last_lon:.4f}" if last_lat is not None and last_lon is not None else "N/A"
-        takeoff_maps_link = get_Maps_link(last_lat, last_lon)
-
-        takeoff_utc_dt = current_utc_dt
-        takeoff_utc_str, takeoff_local_str = format_full_time_for_location(takeoff_utc_dt, last_lat, last_lon)
-
-        msg = (
-            f"The {aircraft_name} took off from {takeoff_location} at {takeoff_local_str} "
-            f"(UTC: {takeoff_utc_str.split('UTC')[0].strip()}). 🚀\n"
-            f"GPS: {takeoff_coordinates}\n"
-            f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
-        )
-        post_to_bluesky(msg, test_mode=test_mode)
-
-        email_subject = f"Plane Status Change: {aircraft_name} - TAKEN OFF!"
-        email_body = (
-            f"The {aircraft_name} has just taken off from {takeoff_location}.\n\n"
-            f"GPS Coordinates: {takeoff_coordinates}\n"
-            f"Google Maps: {takeoff_maps_link}\n"
-            f"Takeoff Time (Local TZ): {takeoff_local_str}\n"
-            f"Takeoff Time (UTC): {takeoff_utc_str}\n\n"
-            f"Current altitude: {alt} feet\n"
-            f"Current ground speed: {gs} knots\n"
-            f"Track it live: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
-            f"This notification was sent by your plane tracker script."
-        )
-        send_email(email_subject, email_body, RECIPIENT_EMAIL)
-
-        # Update state to flying and save the takeoff location, reset last_idle_notification_time
-        set_current_state("flying", lat, lon, current_time_timestamp, takeoff_location_name=takeoff_location, last_idle_notification_time=0)
-        log_message(f"Plane took off from: {takeoff_location} at Local: {takeoff_local_str} (UTC: {takeoff_utc_str})")
-
-    elif not is_flying and current_state == "flying":
-        # Plane just landed - reset last_idle_notification_time for the new landed period
-        landing_location = get_location_name(lat, lon) 
-        # Ensure coordinates are not None before formatting
-        landing_coordinates = f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "N/A"
-        landing_maps_link = get_Maps_link(lat, lon)
-
-        landing_utc_dt = current_utc_dt
-        landing_utc_str, landing_local_str = format_full_time_for_location(landing_utc_dt, lat, lon)
-
-        # --- Calculate flight metrics for actual landing ---
-        flight_metrics = calculate_flight_metrics(last_lat, last_lon, lat, lon)
-        distance_str = f"Distance: {flight_metrics['distance_nm']} nm" if flight_metrics['distance_nm'] > 0 else ""
-        fuel_str = f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal" if flight_metrics['fuel_gallons'] > 0 else ""
-        co2_str = f"CO2: {flight_metrics['co2_tons']:.2f} tons" if flight_metrics['co2_tons'] > 0 else ""
-        car_equiv_str = f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi" if flight_metrics['equivalent_car_miles'] > 0 else ""
-
-        metrics_display_short = ""
-        metrics_display_long = ""
-        if distance_str:
-            metrics_display_short += distance_str
-            metrics_display_long += distance_str
-        if fuel_str:
-            if metrics_display_short: metrics_display_short += ", "
-            metrics_display_short += fuel_str
-            if metrics_display_long: metrics_display_long += ", "
-            metrics_display_long += fuel_str
-        if co2_str:
-            if metrics_display_short: metrics_display_short += ", "
-            metrics_display_short += co2_str
-            if metrics_display_long: metrics_display_long += ", "
-            metrics_display_long += co2_str
-        if car_equiv_str:
-            if metrics_display_short: metrics_display_short += ", "
-            metrics_display_short += car_equiv_str
-            if metrics_display_long: metrics_display_long += ", "
-            metrics_display_long += car_equiv_str
-
-        if metrics_display_short:
-            metrics_display_short = f"\n{metrics_display_short}"
-
-
-        # First Bluesky post (main landing notification)
-        msg_main = (
-            f"The {aircraft_name} landed at {landing_location} at {landing_local_str} "
-            f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬"
-            f"{metrics_display_short}\n"
-            f"GPS: {landing_coordinates}\n"
-            f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
-        )
-        post_to_bluesky(msg_main, test_mode=test_mode)
-
-        # Second Bluesky post (concise flight metrics, only if distance > 0)
-        if flight_metrics['distance_nm'] > 0:
-            sleep(2)
-            last_takeoff_location_for_post = last_takeoff_location if last_takeoff_location else "previous point"
-            msg_metrics = (
-                f"(Conservative estimate) From {last_takeoff_location_for_post} to {landing_location}: "
-                f"Flight length: {flight_metrics['distance_nm']}nm. "
-                f"Fuel used: {flight_metrics['fuel_gallons']:.2f}gal. "
-                f"CO2 Emitted: {flight_metrics['co2_tons']:.2f}ton. "
-                f"EPA Estimated Car Equivalent: {flight_metrics['equivalent_car_miles']}mi."
-            )
-            log_message(f"Attempting to send second Bluesky post with metrics: '{msg_metrics}'")
-            post_to_bluesky(msg_metrics, test_mode=test_mode)
-
-
-        email_subject = f"Plane Status Change: {aircraft_name} - LANDED!"
-        email_body = (
-            f"The {aircraft_name} has just landed at {landing_location}.\n\n"
-            f"GPS Coordinates: {landing_coordinates}\n"
-            f"Google Maps: {landing_maps_link}\n"
-            f"Landing Time (Local TZ): {landing_local_str}\n"
-            f"Landing Time (UTC): {landing_utc_str}\n\n"
-            f"Current altitude: {alt} feet\n"
-            f"Current ground speed: {gs} knots\n"
-            f"{metrics_display_long.replace(', ', '\n')}\n\n"
-            f"View last known position: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
-            f"This notification was sent by your plane tracker script."
-        )
-        send_email(email_subject, email_body, RECIPIENT_EMAIL)
-
-        # After an actual landing, reset last_idle_notification_time for the new landed state
-        set_current_state("landed", lat, lon, current_time_timestamp, takeoff_location_name=None, last_idle_notification_time=0)
-        log_message(f"Plane landed at: {landing_location} at Local: {landing_local_str} (UTC: {landing_utc_str})")
-
-    else:
-        log_message("No change in plane status.")
-        # If no state change, preserve the last_change_time and last_idle_notification_time
-        # We update lat/lon here to always have the latest known position if available
-        if lat is not None and lon is not None:
+        if time_since_last_change < MIN_STATE_CHANGE_TIME and not test_mode:
+            log_message(f"Minimum time threshold not met ({MIN_STATE_CHANGE_TIME}s). Skipping state change.")
+            # Preserve takeoff_location and last_idle_notification_time status
             set_current_state(current_state, lat, lon, last_change_time, takeoff_location_name=last_takeoff_location, last_idle_notification_time=last_idle_notification_time)
+            return
+
+        # Logic for state transitions (when data IS available)
+        if is_flying and current_state == "landed":
+            # Plane just took off - reset last_idle_notification_time
+            takeoff_location = get_location_name(last_lat, last_lon) 
+            # Ensure coordinates are not None before formatting
+            takeoff_coordinates = f"{last_lat:.4f}, {last_lon:.4f}" if last_lat is not None and last_lon is not None else "N/A"
+            takeoff_maps_link = get_Maps_link(last_lat, last_lon)
+
+            takeoff_utc_dt = current_utc_dt
+            takeoff_utc_str, takeoff_local_str = format_full_time_for_location(takeoff_utc_dt, last_lat, last_lon)
+
+            msg = (
+                f"The {aircraft_name} took off from {takeoff_location} at {takeoff_local_str} "
+                f"(UTC: {takeoff_utc_str.split('UTC')[0].strip()}). 🚀\n"
+                f"GPS: {takeoff_coordinates}\n"
+                f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
+            )
+            post_to_bluesky(msg, test_mode=test_mode)
+
+            email_subject = f"Plane Status Change: {aircraft_name} - TAKEN OFF!"
+            email_body = (
+                f"The {aircraft_name} has just taken off from {takeoff_location}.\n\n"
+                f"GPS Coordinates: {takeoff_coordinates}\n"
+                f"Google Maps: {takeoff_maps_link}\n"
+                f"Takeoff Time (Local TZ): {takeoff_local_str}\n"
+                f"Takeoff Time (UTC): {takeoff_utc_str}\n\n"
+                f"Current altitude: {alt} feet\n"
+                f"Current ground speed: {gs} knots\n"
+                f"Track it live: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
+                f"This notification was sent by your plane tracker script."
+            )
+            send_email(email_subject, email_body, RECIPIENT_EMAIL)
+
+            # Update state to flying and save the takeoff location, reset last_idle_notification_time
+            set_current_state("flying", lat, lon, current_time_timestamp, takeoff_location_name=takeoff_location, last_idle_notification_time=0)
+            log_message(f"Plane took off from: {takeoff_location} at Local: {takeoff_local_str} (UTC: {takeoff_utc_str})")
+
+        elif not is_flying and current_state == "flying":
+            # Plane just landed - reset last_idle_notification_time for the new landed period
+            landing_location = get_location_name(lat, lon) 
+            # Ensure coordinates are not None before formatting
+            landing_coordinates = f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "N/A"
+            landing_maps_link = get_Maps_link(lat, lon)
+
+            landing_utc_dt = current_utc_dt
+            landing_utc_str, landing_local_str = format_full_time_for_location(landing_utc_dt, lat, lon)
+
+            # --- Calculate flight metrics for actual landing ---
+            flight_metrics = calculate_flight_metrics(last_lat, last_lon, lat, lon)
+            distance_str = f"Distance: {flight_metrics['distance_nm']} nm" if flight_metrics['distance_nm'] > 0 else ""
+            fuel_str = f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal" if flight_metrics['fuel_gallons'] > 0 else ""
+            co2_str = f"CO2: {flight_metrics['co2_tons']:.2f} tons" if flight_metrics['co2_tons'] > 0 else ""
+            car_equiv_str = f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi" if flight_metrics['equivalent_car_miles'] > 0 else ""
+
+            metrics_display_short = ""
+            metrics_display_long = ""
+            if distance_str:
+                metrics_display_short += distance_str
+                metrics_display_long += distance_str
+            if fuel_str:
+                if metrics_display_short: metrics_display_short += ", "
+                metrics_display_short += fuel_str
+                if metrics_display_long: metrics_display_long += ", "
+                metrics_display_long += fuel_str
+            if co2_str:
+                if metrics_display_short: metrics_display_short += ", "
+                metrics_display_short += co2_str
+                if metrics_display_long: metrics_display_long += ", "
+                metrics_display_long += co2_str
+            if car_equiv_str:
+                if metrics_display_short: metrics_display_short += ", "
+                metrics_display_short += car_equiv_str
+                if metrics_display_long: metrics_display_long += ", "
+                metrics_display_long += car_equiv_str
+
+            if metrics_display_short:
+                metrics_display_short = f"\n{metrics_display_short}"
+
+
+            # First Bluesky post (main landing notification)
+            msg_main = (
+                f"The {aircraft_name} landed at {landing_location} at {landing_local_str} "
+                f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬"
+                f"{metrics_display_short}\n"
+                f"GPS: {landing_coordinates}\n"
+                f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
+            )
+            post_to_bluesky(msg_main, test_mode=test_mode)
+
+            # Second Bluesky post (concise flight metrics, only if distance > 0)
+            if flight_metrics['distance_nm'] > 0:
+                sleep(2)
+                last_takeoff_location_for_post = last_takeoff_location if last_takeoff_location else "previous point"
+                msg_metrics = (
+                    f"(Conservative estimate) From {last_takeoff_location_for_post} to {landing_location}: "
+                    f"Flight length: {flight_metrics['distance_nm']}nm. "
+                    f"Fuel used: {flight_metrics['fuel_gallons']:.2f}gal. "
+                    f"CO2 Emitted: {flight_metrics['co2_tons']:.2f}ton. "
+                    f"EPA Estimated Car Equivalent: {flight_metrics['equivalent_car_miles']}mi."
+                )
+                log_message(f"Attempting to send second Bluesky post with metrics: '{msg_metrics}'")
+                post_to_bluesky(msg_metrics, test_mode=test_mode)
+
+
+            email_subject = f"Plane Status Change: {aircraft_name} - LANDED!"
+            email_body = (
+                f"The {aircraft_name} has just landed at {landing_location}.\n\n"
+                f"GPS Coordinates: {landing_coordinates}\n"
+                f"Google Maps: {landing_maps_link}\n"
+                f"Landing Time (Local TZ): {landing_local_str}\n"
+                f"Landing Time (UTC): {landing_utc_str}\n\n"
+                f"Current altitude: {alt} feet\n"
+                f"Current ground speed: {gs} knots\n"
+                f"{metrics_display_long.replace(', ', '\n')}\n\n"
+                f"View last known position: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
+                f"This notification was sent by your plane tracker script."
+            )
+            send_email(email_subject, email_body, RECIPIENT_EMAIL)
+
+            # After an actual landing, reset last_idle_notification_time for the new landed state
+            set_current_state("landed", lat, lon, current_time_timestamp, takeoff_location_name=None, last_idle_notification_time=0)
+            log_message(f"Plane landed at: {landing_location} at Local: {landing_local_str} (UTC: {landing_utc_str})")
+
+        else:
+            log_message("No change in plane status.")
+            # If no state change, preserve the last_change_time and last_idle_notification_time
+            # We update lat/lon here to always have the latest known position if available
+            if lat is not None and lon is not None:
+                set_current_state(current_state, lat, lon, last_change_time, takeoff_location_name=last_takeoff_location, last_idle_notification_time=last_idle_notification_time)
 
     log_message("--- Main script execution finished ")
 

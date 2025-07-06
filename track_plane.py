@@ -10,26 +10,46 @@ from timezonefinder import TimezoneFinder
 import pytz
 import subprocess
 import math
-import re 
+import re
 
 # --- Load Environment Variables ---
+# This loads variables from the .env file into the environment
 load_dotenv()
 
-# --- Configuration ---
-PLANE_CODE = os.getenv("PLANE_CODE")  # ICAO hex of the plane to monitor, loaded from .env
-BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE") # Your Bluesky handle (e.g., yourname.bsky.social)
-BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD") # Your Bluesky App Password (generate from Bluesky settings)
-RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL") # The email address to send notifications to
+# --- Configuration (from .env file) ---
+
+# --- Credentials & Identifiers ---
+PLANE_CODE = os.getenv("PLANE_CODE")
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
+BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD")
+RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
+GEOLOCATOR_EMAIL = os.getenv("GEOLOCATOR_EMAIL", "plane-tracker@example.com") # Default if not set
+
+# --- Script Behavior & Thresholds ---
+ALTITUDE_THRESHOLD = int(os.getenv("ALTITUDE_THRESHOLD", "500"))
+GROUND_SPEED_THRESHOLD = int(os.getenv("GROUND_SPEED_THRESHOLD", "50"))
+MIN_STATE_CHANGE_TIME = int(os.getenv("MIN_STATE_CHANGE_TIME", "300"))
+IDLE_NOTIFICATION_THRESHOLD_HOURS = int(os.getenv("IDLE_NOTIFICATION_THRESHOLD_HOURS", "12"))
+LOG_RETENTION_HOURS = int(os.getenv("LOG_RETENTION_HOURS", "6"))
+RETRY_COUNT = int(os.getenv("RETRY_COUNT", "2"))
+RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
+
+# --- Aircraft & Flight Metrics ---
+DEFAULT_FUEL_BURN_GAL_PER_NM = float(os.getenv("DEFAULT_FUEL_BURN_GAL_PER_NM", "0.97"))
+JET_FUEL_CO2_LBS_PER_GALLON = float(os.getenv("JET_FUEL_CO2_LBS_PER_GALLON", "21.1"))
+LBS_PER_METRIC_TON = float(os.getenv("LBS_PER_METRIC_TON", "2204.62"))
+CO2_TONS_PER_AVG_CAR_MILE = float(os.getenv("CO2_TONS_PER_AVG_CAR_MILE", "0.0004"))
+
+# --- Static & Derived Configuration ---
+IDLE_NOTIFICATION_THRESHOLD_SECONDS = IDLE_NOTIFICATION_THRESHOLD_HOURS * 3600
+EARTH_RADIUS_NM = 3440.065  # Earth's mean radius in Nautical Miles
 
 # API Endpoints
 ADSB_LOL_API_URL = "https://api.adsb.lol/v2/hex/{icao_hex}"
 ADSB_FI_API_URL = "https://opendata.adsb.fi/api/v2/hex/{icao_hex}"
 
-ALTITUDE_THRESHOLD = 500    # Feet
-GROUND_SPEED_THRESHOLD = 50     # Knots
-MIN_STATE_CHANGE_TIME = 300      # Minimum seconds between state changes (5 minutes)
-IDLE_NOTIFICATION_THRESHOLD_HOURS = 12 # Hours
-IDLE_NOTIFICATION_THRESHOLD_SECONDS = IDLE_NOTIFICATION_THRESHOLD_HOURS * 3600
+# Geocoding configuration
+GEOLOCATOR_USER_AGENT = f"PlaneTrackerApp/1.0 ({GEOLOCATOR_EMAIL})"
 
 # Get the absolute path of the directory where the script is located
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,38 +57,24 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Define the state file and log file paths relative to the script's location
 STATE_FILE = os.path.join(SCRIPT_DIR, "plane_state.txt")
 LOG_FILE = os.path.join(SCRIPT_DIR, "plane_tracker.log")
-LOG_RETENTION_HOURS = 6 # Keep logs for the last 6 hours
 
-RETRY_COUNT = 2
-RETRY_DELAY = 2
-
-# Geocoding configuration
-GEOLOCATOR_USER_AGENT = "PlaneTrackerApp/1.0 (your-email@example.com)" # Replace with your contact email
-
-# Timezone finder instance
+# Timezone finder instance and a global for the script's current run timezone
 TZ_FINDER = TimezoneFinder()
-
-# --- Aviation Constants for Calculations (Loaded from .env or default conservative estimates) ---
-EARTH_RADIUS_NM = 3440.065  # Earth's mean radius in Nautical Miles
-DEFAULT_FUEL_BURN_GAL_PER_NM = float(os.getenv("DEFAULT_FUEL_BURN_GAL_PER_NM", "1.05")) # Conservative estimate: 512 GPH / 487 Knots
-JET_FUEL_CO2_LBS_PER_GALLON = 21.1 # Pounds of CO2 per US gallon of Jet A/A-1
-LBS_PER_METRIC_TON = 2204.62 # Pounds per metric ton
-CO2_TONS_PER_AVG_CAR_MILE = 0.0004 # Approx.
+SCRIPT_RUN_TZ = pytz.UTC # Default to UTC, will be updated in main()
 
 # --- Logging ---
 def log_message(message, source_api=None):
     """
     Logs a message to the console and a rotating log file.
-    Reports time in both local (America/New_York) and UTC.
-    Includes the API source if provided.
+    Reports time in both the script's dynamic local timezone and UTC.
     Log file is pruned to retain only entries from the last LOG_RETENTION_HOURS.
     """
     # Get current UTC time
     utc_now = datetime.datetime.now(pytz.UTC)
     utc_timestamp_str = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # Define the local timezone for EDT (America/New_York)
-    local_tz = pytz.timezone('America/New_York')
+    # Use the globally set timezone for this script run
+    local_tz = SCRIPT_RUN_TZ
     local_now = utc_now.astimezone(local_tz)
     local_timestamp_str = local_now.strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
@@ -81,11 +87,11 @@ def log_message(message, source_api=None):
         with open(LOG_FILE, "r") as f:
             all_log_entries = f.readlines()
 
-    all_log_entries.append(log_entry) 
+    all_log_entries.append(log_entry)
 
     # Filter out old entries based on time
     retention_delta = datetime.timedelta(hours=LOG_RETENTION_HOURS)
-    current_utc_time_dt = datetime.datetime.now(pytz.UTC) 
+    current_utc_time_dt = datetime.datetime.now(pytz.UTC)
 
     # Regex to find the UTC timestamp in the log line, e.g., "(YYYY-MM-DD HH:MM:SS UTC)"
     timestamp_pattern = re.compile(r'\((\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC\)')
@@ -111,12 +117,12 @@ def log_message(message, source_api=None):
     with open(LOG_FILE, "w") as f:
         f.writelines(filtered_entries)
 
-    print(log_entry.strip()) 
+    print(log_entry.strip())
 
 # --- Timezone Helper ---
 def get_timezone_from_coordinates(latitude: float, longitude: float) -> pytz.BaseTzInfo:
     """
-    Gets the timezone for given coordinates.
+    Gets the timezone for given coordinates. Defaults to UTC if coords are invalid.
     """
     if latitude is None or longitude is None:
         return pytz.UTC
@@ -134,7 +140,7 @@ def get_timezone_from_coordinates(latitude: float, longitude: float) -> pytz.Bas
 
 def format_full_time_for_location(utc_dt: datetime.datetime, latitude: float, longitude: float) -> tuple[str, str]:
     """
-    Formates a UTC datetime object into both UTC and local timezone strings
+    Formats a UTC datetime object into both UTC and local timezone strings
     for the given coordinates.
     """
     if utc_dt.tzinfo is None or utc_dt.tzinfo.utcoffset(utc_dt) is None:
@@ -158,9 +164,10 @@ def format_full_time_for_location(utc_dt: datetime.datetime, latitude: float, lo
 
 
 # --- Data Fetching Functions ---
-def _fetch_data_from_api(url: str, source_name: str, icao_hex: str) -> tuple[dict | None, bool, str | None]:
+def _fetch_data_from_api(url: str, source_name: str, icao_hex: str, suppress_email_on_fail: bool = False) -> tuple[dict | None, bool, str | None]:
     """
-    Helper function to fetch plane data from a specific API URL. Handles retries and logs errors with the source name.
+    Helper function to fetch plane data from a specific API URL. Handles retries and logs errors.
+    Can suppress email notifications on failure, used for the primary API before failover.
     """
     full_url = url.format(icao_hex=icao_hex)
     error_msg = None
@@ -192,7 +199,7 @@ def _fetch_data_from_api(url: str, source_name: str, icao_hex: str) -> tuple[dic
         except requests.exceptions.Timeout:
             error_msg = f"Timeout fetching data from {source_name}: Read timed out."
             log_message(f"Attempt {attempt + 1} - {error_msg}", source_api=source_name)
-            if attempt == RETRY_COUNT: # Send email only after all retries fail
+            if attempt == RETRY_COUNT and not suppress_email_on_fail:
                 email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Timeout!"
                 email_body = f"The plane tracker script failed to fetch data from {source_name} due to a timeout after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check the API service and your network connection."
                 send_email(email_subject, email_body, RECIPIENT_EMAIL)
@@ -200,21 +207,22 @@ def _fetch_data_from_api(url: str, source_name: str, icao_hex: str) -> tuple[dic
         except requests.exceptions.HTTPError as e:
             error_msg = f"HTTP Error fetching data from {source_name}: {e}"
             log_message(f"Attempt {attempt + 1} - {error_msg}", source_api=source_name)
-            if e.response.status_code == 429:
-                if attempt == RETRY_COUNT: # Send email only after all retries fail for 429
-                    email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Rate Limit Exceeded!"
-                    email_body = f"The plane tracker script was rate-limited by {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check your usage and the API's rate limit policies."
+            if not suppress_email_on_fail:
+                if e.response.status_code == 429:
+                    if attempt == RETRY_COUNT:
+                        email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Rate Limit Exceeded!"
+                        email_body = f"The plane tracker script was rate-limited by {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check your usage and the API's rate limit policies."
+                        send_email(email_subject, email_body, RECIPIENT_EMAIL)
+                        log_message(f"Email sent about {source_name} API rate limit.", source_api="email")
+                elif attempt == RETRY_COUNT:
+                    email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} HTTP Error!"
+                    email_body = f"The plane tracker script encountered an HTTP error from {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check the API service."
                     send_email(email_subject, email_body, RECIPIENT_EMAIL)
-                    log_message(f"Email sent about {source_name} API rate limit.", source_api="email")
-            elif attempt == RETRY_COUNT: # For other HTTP errors, send email after all retries fail
-                email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} HTTP Error!"
-                email_body = f"The plane tracker script encountered an HTTP error from {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check the API service."
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
-                log_message(f"Email sent about {source_name} HTTP error.", source_api="email")
+                    log_message(f"Email sent about {source_name} HTTP error.", source_api="email")
         except requests.RequestException as e:
             error_msg = f"General Request Error fetching data from {source_name}: {e}"
             log_message(f"Attempt {attempt + 1} - {error_msg}", source_api=source_name)
-            if attempt == RETRY_COUNT: # Send email only after all retries fail
+            if attempt == RETRY_COUNT and not suppress_email_on_fail:
                 email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} General Request Error!"
                 email_body = f"The plane tracker script encountered a general request error from {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease check your network connection and the API service."
                 send_email(email_subject, email_body, RECIPIENT_EMAIL)
@@ -222,7 +230,7 @@ def _fetch_data_from_api(url: str, source_name: str, icao_hex: str) -> tuple[dic
         except Exception as e:
             error_msg = f"Unexpected error fetching data from {source_name}: {e}"
             log_message(f"Attempt {attempt + 1} - {error_msg}", source_api=source_name)
-            if attempt == RETRY_COUNT: # Send email only after all retries fail
+            if attempt == RETRY_COUNT and not suppress_email_on_fail:
                 email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} Unexpected Error!"
                 email_body = f"The plane tracker script encountered an unexpected error while fetching data from {source_name} after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}\n\nPlease investigate the script or API."
                 send_email(email_subject, email_body, RECIPIENT_EMAIL)
@@ -247,7 +255,8 @@ def get_plane_data(icao_hex: str, spoof_data: dict = None) -> dict:
     source_used = None
 
     log_message(f"Attempting to fetch data from ADSB.lol (primary).", source_api="adsb.lol")
-    plane_data_lol, lol_api_successful, lol_error_msg = _fetch_data_from_api(ADSB_LOL_API_URL, "adsb.lol", icao_hex)
+    # Call primary API with email suppression on failure
+    plane_data_lol, lol_api_successful, lol_error_msg = _fetch_data_from_api(ADSB_LOL_API_URL, "adsb.lol", icao_hex, suppress_email_on_fail=True)
 
     if plane_data_lol:
         plane_data = plane_data_lol
@@ -255,6 +264,7 @@ def get_plane_data(icao_hex: str, spoof_data: dict = None) -> dict:
         log_message(f"Data successfully retrieved from {source_used}.", source_api=source_used)
     elif not lol_api_successful:
         log_message(f"ADSB.lol API call failed. Attempting to fetch data from ADSB.fi (failover).", source_api="adsb.fi")
+        # Call failover API without email suppression
         plane_data_fi, fi_api_successful, fi_error_msg = _fetch_data_from_api(ADSB_FI_API_URL, "adsb.fi", icao_hex)
 
         if plane_data_fi:
@@ -268,9 +278,8 @@ def get_plane_data(icao_hex: str, spoof_data: dict = None) -> dict:
             else:
                 log_message(f"ADSB.fi responded successfully but found no aircraft data. No plane data could be retrieved from any source.", source_api="adsb.fi (no data)")
 
-            # The dual API failure email is still handled here, outside the retry logic of _fetch_data_from_api
-            # This is correct as it's a higher-level failure condition
-            if not fi_api_successful: 
+            # Send a single email now that both APIs have definitively failed.
+            if not fi_api_successful:
                 email_subject = f"CRITICAL: Plane Tracker - Both APIs Failed!"
                 email_body = (
                     f"Your plane tracker script failed to retrieve data from both ADSB.lol and ADSB.fi.\n\n"
@@ -293,7 +302,7 @@ def get_location_name(latitude: float, longitude: float) -> str:
     if latitude is None or longitude is None:
         return "an unknown location"
 
-    geolocator = Nominatim(user_agent="PlaneTrackerApp/1.0 (your-email@example.com)") # Placeholder for user agent email
+    geolocator = Nominatim(user_agent=GEOLOCATOR_USER_AGENT)
 
     try:
         location = geolocator.reverse(f"{latitude}, {longitude}", timeout=10)
@@ -352,7 +361,7 @@ def get_current_state() -> tuple:
         with open(STATE_FILE, "r") as f:
             lines = f.readlines()
             # New format expects 6 lines for last_idle_notification_time
-            if len(lines) >= 6: 
+            if len(lines) >= 6:
                 state = lines[0].strip()
                 try:
                     last_lat = float(lines[1].strip()) if lines[1].strip() else None
@@ -360,13 +369,13 @@ def get_current_state() -> tuple:
                     last_change_time = float(lines[3].strip()) if lines[3].strip() else 0
                     last_takeoff_location_name = lines[4].strip() if lines[4].strip() else None
                     # Read last_idle_notification_time, default to 0 if not present or unparseable
-                    last_idle_notification_time = float(lines[5].strip()) if lines[5].strip() else 0 
+                    last_idle_notification_time = float(lines[5].strip()) if lines[5].strip() else 0
                 except ValueError:
                     log_message("Error parsing state file. Resetting to defaults.")
                     return "landed", None, None, 0, None, 0
                 return state, last_lat, last_lon, last_change_time, last_takeoff_location_name, last_idle_notification_time
             # Older format with 5 lines for takeoff_location_name
-            elif len(lines) >= 5: 
+            elif len(lines) >= 5:
                 state = lines[0].strip()
                 try:
                     last_lat = float(lines[1].strip()) if lines[1].strip() else None
@@ -377,7 +386,7 @@ def get_current_state() -> tuple:
                     log_message("Error parsing older state file format. Resetting to defaults.")
                     return "landed", None, None, 0, None, 0
                 # Default last_idle_notification_time to 0 for older formats
-                return state, last_lat, last_lon, last_change_time, last_takeoff_location_name, 0 
+                return state, last_lat, last_lon, last_change_time, last_takeoff_location_name, 0
             else: # Even older format or corrupted, reset all
                 log_message("Older/incomplete state file format. Resetting to defaults.")
                 return "landed", None, None, 0, None, 0
@@ -391,23 +400,20 @@ def set_current_state(state: str, latitude: float = None, longitude: float = Non
         timestamp = datetime.datetime.now(pytz.UTC).timestamp()
 
     with open(STATE_FILE, "w") as f:
+        f.write(f"{state}\n")
         f.write(f"{latitude if latitude is not None else ''}\n")
         f.write(f"{longitude if longitude is not None else ''}\n")
         f.write(f"{timestamp}\n")
         f.write(f"{takeoff_location_name if takeoff_location_name is not None else ''}\n")
-        f.write(f"{last_idle_notification_time}\n") 
-        # Add state to the end to ensure it's written last in case of crash
-        f.write(f"{state}\n") 
+        f.write(f"{last_idle_notification_time}\n") # Store the timestamp
     log_message(f"State updated to: {state} (Lat: {latitude}, Lon: {longitude}, Takeoff Loc: {takeoff_location_name}, Last Idle Notif Time: {datetime.datetime.fromtimestamp(last_idle_notification_time, tz=pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC') if last_idle_notification_time else 'N/A'})")
-
 
 # --- Aircraft Info Helper ---
 def get_aircraft_display_name(plane_data: dict) -> str:
     """
     Extracts aircraft registration/tail number and creates a display name.
     """
-    # Use PLANE_CODE from environment variable, not a hardcoded default
-    icao = PLANE_CODE.upper() if PLANE_CODE else "UNKNOWN_ICAO" 
+    icao = PLANE_CODE.upper() if PLANE_CODE else "UNKNOWN_ICAO"
     registration = plane_data.get("r") or plane_data.get("reg") or plane_data.get("registration")
     if registration:
         return f"The aircraft you are tracking ({registration}, ICAO: {icao})"
@@ -496,19 +502,19 @@ def calculate_flight_metrics(lat1: float, lon1: float, lat2: float, lon2: float)
 
     distance_nm = EARTH_RADIUS_NM * c
 
-    fuel_gallons = distance_nm * DEFAULT_FUEL_BURN_GAL_PER_NM 
+    fuel_gallons = distance_nm * DEFAULT_FUEL_BURN_GAL_PER_NM
     co2_lbs = fuel_gallons * JET_FUEL_CO2_LBS_PER_GALLON
     co2_tons = co2_lbs / LBS_PER_METRIC_TON
 
     equivalent_car_miles = 0.0
-    if CO2_TONS_PER_AVG_CAR_MILE > 0: 
+    if CO2_TONS_PER_AVG_CAR_MILE > 0:
         equivalent_car_miles = co2_tons / CO2_TONS_PER_AVG_CAR_MILE
 
     return {
         'distance_nm': round(distance_nm, 2),
         'fuel_gallons': round(fuel_gallons, 2),
         'co2_tons': round(co2_tons, 2),
-        'equivalent_car_miles': round(equivalent_car_miles) 
+        'equivalent_car_miles': round(equivalent_car_miles)
     }
 
 
@@ -517,10 +523,18 @@ def main(spoof_data: dict = None, test_mode: bool = False):
     """
     Main function to fetch plane data, determine state, and post updates.
     """
-    log_message("--- Main script execution started ---")
+    global SCRIPT_RUN_TZ
+    
+    if not PLANE_CODE:
+        # Initial log before timezone is set
+        print(f"{datetime.datetime.now(pytz.UTC).strftime('%Y-%m-%d %H:%M:%S UTC')} - CRITICAL: PLANE_CODE is not set in the .env file. Exiting.")
+        return
 
-    # Retrieve all state variables, including the new takeoff_location_name and last_idle_notification_time
+    # Retrieve state and set the timezone for this script run based on last known location
     current_state, last_lat, last_lon, last_change_time, last_takeoff_location, last_idle_notification_time = get_current_state()
+    SCRIPT_RUN_TZ = get_timezone_from_coordinates(last_lat, last_lon)
+
+    log_message(f"--- Main script execution started (using timezone: {SCRIPT_RUN_TZ}) ---")
 
     current_utc_dt = datetime.datetime.now(pytz.UTC)
     current_time_timestamp = current_utc_dt.timestamp()
@@ -544,55 +558,26 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 log_message(f"Minimum time threshold not met ({MIN_STATE_CHANGE_TIME}s). Skipping assumed landing notification.")
                 return
 
-            # --- Calculate metrics for assumed landing (distance will be 0) ---
-            # We use last_lat/lon for both points as we assume it landed where it was last seen.
-            flight_metrics = calculate_flight_metrics(last_lat, last_lon, last_lat, last_lon)
-            distance_str = f"Distance: {flight_metrics['distance_nm']} nm" if flight_metrics['distance_nm'] > 0 else ""
-            fuel_str = f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal" if flight_metrics['fuel_gallons'] > 0 else ""
-            co2_str = f"CO2: {flight_metrics['co2_tons']:.2f} tons" if flight_metrics['co2_tons'] > 0 else ""
-            car_equiv_str = f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi" if flight_metrics['equivalent_car_miles'] > 0 else ""
-
-            metrics_display_short = ""
-            metrics_display_long = ""
-            if distance_str:
-                metrics_display_short += distance_str
-                metrics_display_long += distance_str
-            if fuel_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += fuel_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += fuel_str
-            if co2_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += co2_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += co2_str
-            if car_equiv_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += car_equiv_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += car_equiv_str
-
-            if metrics_display_short:
-                metrics_display_short = f"\n{metrics_display_short}"
-
-            landing_location = get_location_name(last_lat, last_lon) 
-            # Ensure coordinates are not None before formatting
+            landing_location = get_location_name(last_lat, last_lon)
             landing_coordinates = f"{last_lat:.4f}, {last_lon:.4f}" if last_lat is not None and last_lon is not None else "N/A"
             landing_maps_link = get_Maps_link(last_lat, last_lon)
 
             landing_utc_dt = current_utc_dt
             landing_utc_str, landing_local_str = format_full_time_for_location(landing_utc_dt, last_lat, last_lon)
-
-            msg = (
+            
+            # First Bluesky post: Just the landing info
+            msg_main = (
                 f"The {aircraft_name} landed (last seen near {landing_location}) at {landing_local_str} "
-                f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬"
-                f"{metrics_display_short}\n"
+                f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬\n"
                 f"GPS: {landing_coordinates}\n"
                 f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
             )
-            post_to_bluesky(msg, test_mode=test_mode)
-
+            post_to_bluesky(msg_main, test_mode=test_mode)
+            
+            # We assume it landed where it was last seen, so flight metrics are based on that.
+            flight_metrics = calculate_flight_metrics(last_lat, last_lon, last_lat, last_lon)
+            
+            # Second Bluesky post: Just the metrics, if the flight was tracked
             if flight_metrics['distance_nm'] > 0:
                 sleep(2)
                 last_takeoff_location_for_post = last_takeoff_location if last_takeoff_location else "previous point"
@@ -606,6 +591,13 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 log_message(f"Attempting to send second Bluesky post with metrics: '{msg_metrics}'")
                 post_to_bluesky(msg_metrics, test_mode=test_mode)
 
+            # Construct full metrics string for email
+            metrics_display_long = (
+                f"Distance: {flight_metrics['distance_nm']} nm\n"
+                f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal\n"
+                f"CO2: {flight_metrics['co2_tons']:.2f} tons\n"
+                f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi"
+            )
 
             email_subject = f"Plane Status Change: {aircraft_name} - LANDED (Data Lost)!"
             email_body = (
@@ -616,7 +608,7 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 f"Google Maps: {landing_maps_link}\n"
                 f"Landing Time (Local TZ): {landing_local_str}\n"
                 f"Landing Time (UTC): {landing_utc_str}\n\n"
-                f"{metrics_display_long.replace(', ', '\n')}\n\n"
+                f"{metrics_display_long}\n\n"
                 f"View last known position: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
                 f"This notification was sent by your plane tracker script."
             )
@@ -629,7 +621,7 @@ def main(spoof_data: dict = None, test_mode: bool = False):
         elif current_state == "landed":
             # Calculate time since last idle notification
             time_since_last_idle_notification = current_time_timestamp - last_idle_notification_time
-            
+
             # If no previous idle notification, or enough time has passed since the last one
             if last_idle_notification_time == 0 or time_since_last_idle_notification >= IDLE_NOTIFICATION_THRESHOLD_SECONDS:
                 log_message(f"Plane has been idle for over {IDLE_NOTIFICATION_THRESHOLD_HOURS} hours since last notification or no notification sent yet. Sending notification.")
@@ -643,7 +635,7 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                     # If we have last known coordinates from the state file, use them for geocoding
                     geocoded_name = get_location_name(last_lat, last_lon)
                     coordinates_for_idle_post = f"{last_lat:.4f}, {last_lon:.4f}"
-                    
+
                     if "unknown location" in geocoded_name:
                         # Geocoding failed or returned generic unknown, use last_takeoff_location if available
                         if last_takeoff_location:
@@ -665,8 +657,9 @@ def main(spoof_data: dict = None, test_mode: bool = False):
 
                 current_utc_str, current_local_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon) # Use last_lat/lon for timezone
 
+                # FIX: Removed redundant (ICAO: ...) from this message string
                 msg_idle = (
-                    f"The {aircraft_name} (ICAO: {PLANE_CODE}) still appears to be on the ground "
+                    f"{aircraft_name} still appears to be on the ground "
                     f"at {location_for_idle_post}{location_note}\n"
                     f"GPS: {coordinates_for_idle_post}\n"
                     f"Time checked: {current_local_str} (UTC: {current_utc_str.split('UTC')[0].strip()}).\n"
@@ -679,10 +672,10 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 set_current_state("landed", last_lat, last_lon, last_change_time, takeoff_location_name=last_takeoff_location, last_idle_notification_time=current_time_timestamp)
             else:
                 log_message("No plane data, and plane was already landed, but not yet time for another idle notification.")
-        return 
+        return
 
     # If we reach here, plane_data IS available
-    else: # This 'else' should be at the same indentation level as 'if not plane_data:'
+    else:
         alt = plane_data.get("alt_baro")
         gnd = plane_data.get("gnd")
         gs = plane_data.get("gs")
@@ -706,7 +699,7 @@ def main(spoof_data: dict = None, test_mode: bool = False):
         # Logic for state transitions (when data IS available)
         if is_flying and current_state == "landed":
             # Plane just took off - reset last_idle_notification_time
-            takeoff_location = get_location_name(last_lat, last_lon) 
+            takeoff_location = get_location_name(last_lat, last_lon)
             # Ensure coordinates are not None before formatting
             takeoff_coordinates = f"{last_lat:.4f}, {last_lon:.4f}" if last_lat is not None and last_lon is not None else "N/A"
             takeoff_maps_link = get_Maps_link(last_lat, last_lon)
@@ -742,57 +735,26 @@ def main(spoof_data: dict = None, test_mode: bool = False):
 
         elif not is_flying and current_state == "flying":
             # Plane just landed - reset last_idle_notification_time for the new landed period
-            landing_location = get_location_name(lat, lon) 
-            # Ensure coordinates are not None before formatting
+            landing_location = get_location_name(lat, lon)
             landing_coordinates = f"{lat:.4f}, {lon:.4f}" if lat is not None and lon is not None else "N/A"
             landing_maps_link = get_Maps_link(lat, lon)
 
             landing_utc_dt = current_utc_dt
             landing_utc_str, landing_local_str = format_full_time_for_location(landing_utc_dt, lat, lon)
 
-            # --- Calculate flight metrics for actual landing ---
-            flight_metrics = calculate_flight_metrics(last_lat, last_lon, lat, lon)
-            distance_str = f"Distance: {flight_metrics['distance_nm']} nm" if flight_metrics['distance_nm'] > 0 else ""
-            fuel_str = f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal" if flight_metrics['fuel_gallons'] > 0 else ""
-            co2_str = f"CO2: {flight_metrics['co2_tons']:.2f} tons" if flight_metrics['co2_tons'] > 0 else ""
-            car_equiv_str = f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi" if flight_metrics['equivalent_car_miles'] > 0 else ""
-
-            metrics_display_short = ""
-            metrics_display_long = ""
-            if distance_str:
-                metrics_display_short += distance_str
-                metrics_display_long += distance_str
-            if fuel_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += fuel_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += fuel_str
-            if co2_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += co2_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += co2_str
-            if car_equiv_str:
-                if metrics_display_short: metrics_display_short += ", "
-                metrics_display_short += car_equiv_str
-                if metrics_display_long: metrics_display_long += ", "
-                metrics_display_long += car_equiv_str
-
-            if metrics_display_short:
-                metrics_display_short = f"\n{metrics_display_short}"
-
-
-            # First Bluesky post (main landing notification)
+            # First Bluesky post: Just the landing info
             msg_main = (
                 f"The {aircraft_name} landed at {landing_location} at {landing_local_str} "
-                f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬"
-                f"{metrics_display_short}\n"
+                f"(UTC: {landing_utc_str.split('UTC')[0].strip()}). 🛬\n"
                 f"GPS: {landing_coordinates}\n"
                 f"Track: https://globe.adsb.fi/?icao={PLANE_CODE}"
             )
             post_to_bluesky(msg_main, test_mode=test_mode)
 
-            # Second Bluesky post (concise flight metrics, only if distance > 0)
+            # --- Calculate flight metrics for actual landing ---
+            flight_metrics = calculate_flight_metrics(last_lat, last_lon, lat, lon)
+            
+            # Second Bluesky post: Just the metrics, if the flight was tracked
             if flight_metrics['distance_nm'] > 0:
                 sleep(2)
                 last_takeoff_location_for_post = last_takeoff_location if last_takeoff_location else "previous point"
@@ -806,6 +768,13 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 log_message(f"Attempting to send second Bluesky post with metrics: '{msg_metrics}'")
                 post_to_bluesky(msg_metrics, test_mode=test_mode)
 
+            # Construct full metrics string for email
+            metrics_display_long = (
+                f"Distance: {flight_metrics['distance_nm']} nm\n"
+                f"Fuel: {flight_metrics['fuel_gallons']:.2f} gal\n"
+                f"CO2: {flight_metrics['co2_tons']:.2f} tons\n"
+                f"Car Equiv: {flight_metrics['equivalent_car_miles']} mi"
+            )
 
             email_subject = f"Plane Status Change: {aircraft_name} - LANDED!"
             email_body = (
@@ -815,8 +784,8 @@ def main(spoof_data: dict = None, test_mode: bool = False):
                 f"Landing Time (Local TZ): {landing_local_str}\n"
                 f"Landing Time (UTC): {landing_utc_str}\n\n"
                 f"Current altitude: {alt} feet\n"
-                f"Current ground speed: {gs} knots\n"
-                f"{metrics_display_long.replace(', ', '\n')}\n\n"
+                f"Current ground speed: {gs} knots\n\n"
+                f"{metrics_display_long}\n\n"
                 f"View last known position: https://globe.adsb.fi/?icao={PLANE_CODE}\n\n"
                 f"This notification was sent by your plane tracker script."
             )

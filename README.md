@@ -147,7 +147,7 @@ Replace /path/to/your/plane_tracker_repo/ with the actual absolute path to the d
 
 The >> ... 2>&1 part redirects all standard output and error messages from the cron job to a separate plane_tracker_cron.log file, which is extremely useful for debugging any issues specific to cron execution.
 
-7. Important Notes
+### 7. Important Notes
 State File (plane_state.txt): This file stores the script's internal state (last known location, timestamps, etc.). Do not delete it unless you want to completely reset all tracking history and force the script to start as if the plane just took off (or landed for the first time).
 
 Log File (plane_tracker.log): This file records all script activity, including API interactions, state changes, and error messages. It automatically prunes old entries based on the LOG_RETENTION_HOURS setting.

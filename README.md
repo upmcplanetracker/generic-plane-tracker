@@ -1,4 +1,4 @@
-# Corporate Jet Tracker for Blue Sky
+# Corporate/Non-Profit Executive Jet Tracker for Blue Sky
 
 This Python script tracks a fleet of aircraft using public ADS-B data and automatically posts takeoff, landing, and flight summary information to a Blue Sky social media account.
 

@@ -64,7 +64,7 @@ Create a file named `.env` and add the following content, replacing the placehol
 # AIRCRAFT FLEET CONFIGURATION
 # Format: ICAO,"Owner",FuelBurn;ICAO,"Owner",FuelBurn;...
 # ----------------------------------------------------
-AIRCRAFT_FLEET='AC0F4A,"UPMC",0.97;A3C19C,"Dick''s Sporting Goods",0.67;A66A59,"PNC",0.74'
+AIRCRAFT_FLEET='A3C19C,"Dick''s Sporting Goods",0.67;A66A59,"PNC",0.74'
 
 # ----------------------------------------------------
 # CREDENTIALS & IDENTIFIERS

@@ -24,15 +24,18 @@ BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
 BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD")
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
 GEOLOCATOR_EMAIL = os.getenv("GEOLOCATOR_EMAIL", "plane-tracker@example.com")
+# NEW: Configurable timezone for logs
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "America/New_York")
+
 
 # --- Script Behavior & Thresholds ---
 ALTITUDE_THRESHOLD = int(os.getenv("ALTITUDE_THRESHOLD", "500"))
 GROUND_SPEED_THRESHOLD = int(os.getenv("GROUND_SPEED_THRESHOLD", "50"))
 MIN_STATE_CHANGE_TIME = int(os.getenv("MIN_STATE_CHANGE_TIME", "300"))
-IDLE_NOTIFICATION_THRESHOLD_HOURS = int(os.getenv("IDLE_NOTIFICATION_THRESHOLD_HOURS", "12"))
 LOG_RETENTION_HOURS = int(os.getenv("LOG_RETENTION_HOURS", "6"))
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "2"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
+OFFLINE_THRESHOLD = 900 # 15 minutes
 
 # --- Aircraft & Flight Metrics ---
 DEFAULT_FUEL_BURN_GAL_PER_NM = float(os.getenv("DEFAULT_FUEL_BURN_GAL_PER_NM", "0.97"))
@@ -41,7 +44,6 @@ LBS_PER_METRIC_TON = float(os.getenv("LBS_PER_METRIC_TON", "2204.62"))
 CO2_TONS_PER_AVG_CAR_MILE = float(os.getenv("CO2_TONS_PER_AVG_CAR_MILE", "0.0004"))
 
 # --- Static & Derived Configuration ---
-IDLE_NOTIFICATION_THRESHOLD_SECONDS = IDLE_NOTIFICATION_THRESHOLD_HOURS * 3600
 EARTH_RADIUS_NM = 3440.065
 
 # --- API Endpoints ---
@@ -55,6 +57,9 @@ GEOLOCATOR_USER_AGENT = f"PlaneTrackerApp/1.0 ({GEOLOCATOR_EMAIL})"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(SCRIPT_DIR, "plane_states.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "plane_tracker.log")
+# NEW: Define a directory for the lock file
+LOCK_FILE_DIR = SCRIPT_DIR
+
 
 # --- Global Instances ---
 TZ_FINDER = TimezoneFinder()
@@ -66,8 +71,9 @@ def log_message(message, source_api=None):
     utc_timestamp_str = utc_now.strftime("%Y-%m-%d %H:%M:%S UTC")
 
     try:
-        local_tz = pytz.timezone("America/New_York")
+        local_tz = pytz.timezone(DEFAULT_TIMEZONE)
     except pytz.UnknownTimeZoneError:
+        print(f"Invalid DEFAULT_TIMEZONE '{DEFAULT_TIMEZONE}'. Falling back to UTC.")
         local_tz = pytz.UTC
 
     local_now = utc_now.astimezone(local_tz)
@@ -155,7 +161,7 @@ def _fetch_data_from_api(url: str, source_name: str, icao_hex: str, suppress_ema
                 response = requests.get(full_url, timeout=5)
 
             response.raise_for_status()
-            
+
             data = response.json()
             if data and 'aircraft' in data and data['aircraft']:
                 log_message(f"Successfully fetched data for {icao_hex} from {source_name}.", source_api=source_name)
@@ -165,31 +171,21 @@ def _fetch_data_from_api(url: str, source_name: str, icao_hex: str, suppress_ema
                 return None, True, None
         except requests.exceptions.Timeout:
             error_msg = f"Timeout fetching data from {source_name}: Read timed out."
-            if attempt == RETRY_COUNT and not suppress_email_on_fail:
-                email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Timeout!"
-                email_body = f"The plane tracker script failed to fetch data from {source_name} due to a timeout after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
         except requests.exceptions.HTTPError as e:
             error_msg = f"HTTP Error fetching data from {source_name}: {e}"
-            if not suppress_email_on_fail and attempt == RETRY_COUNT:
-                email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} HTTP Error!"
-                email_body = f"The plane tracker script encountered an HTTP error from {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
         except requests.RequestException as e:
             error_msg = f"General Request Error fetching data from {source_name}: {e}"
-            if attempt == RETRY_COUNT and not suppress_email_on_fail:
-                email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} General Request Error!"
-                email_body = f"The plane tracker script encountered a general request error from {source_name} API after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
         except Exception as e:
             error_msg = f"Unexpected error fetching data from {source_name}: {e}"
-            if attempt == RETRY_COUNT and not suppress_email_on_fail:
-                email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} Unexpected Error!"
-                email_body = f"The plane tracker script encountered an unexpected error while fetching data from {source_name} after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
+
         if attempt < RETRY_COUNT:
             sleep(RETRY_DELAY)
-            
+    
+    if not suppress_email_on_fail and error_msg:
+        email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Failure!"
+        email_body = f"The plane tracker script failed to fetch data from {source_name} after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
+        send_email(email_subject, email_body, RECIPIENT_EMAIL)
+
     log_message(f"Failed to fetch data for {icao_hex} from {source_name} after {RETRY_COUNT + 1} attempts.", source_api=source_name)
     return None, False, error_msg
 
@@ -271,14 +267,21 @@ def save_all_states(states: dict):
 
 def get_current_state_for_plane(icao_hex: str, all_states: dict) -> dict:
     """Gets the state for a specific aircraft, returning a default if not found."""
-    return all_states.get(icao_hex, {
+    default_state = {
         "state": "landed",
         "last_lat": None,
         "last_lon": None,
+        "takeoff_lat": None,
+        "takeoff_lon": None,
         "last_change_time": 0,
+        "last_seen_time": 0,
         "last_takeoff_location_name": None,
-        "last_idle_notification_time": 0
-    })
+        "monthly_distance": 0.0,
+        "monthly_co2": 0.0,
+        "monthly_car_miles": 0.0
+    }
+    saved_state = all_states.get(icao_hex, {})
+    return {**default_state, **saved_state}
 
 def set_current_state_for_plane(icao_hex: str, owner_name: str, all_states: dict, new_state_data: dict):
     """Updates the state for a specific aircraft in the main states dictionary."""
@@ -287,18 +290,8 @@ def set_current_state_for_plane(icao_hex: str, owner_name: str, all_states: dict
 
 # --- Utility & Formatting Functions ---
 def get_aircraft_display_name(plane_data: dict, icao_hex: str, owner_name: str) -> str:
-    """Creates a display name for the aircraft, e.g., 'UPMC jet (N950UP / A55555)'."""
-    registration = plane_data.get("r")
-    if registration:
-        return f"**{owner_name}** jet ({registration} / {icao_hex.upper()})"
-    else:
-        return f"The **{owner_name}** aircraft ({icao_hex.upper()})"
-
-def get_Maps_link(latitude: float, longitude: float) -> str:
-    """Generates a Google Maps link for the given coordinates."""
-    if latitude is None or longitude is None:
-        return "N/A"
-    return f"https://www.google.com/maps/search/?api=1&query={latitude},{longitude}"
+    """Creates a display name for the aircraft."""
+    return f"**{owner_name}** ({icao_hex.upper()})"
 
 def send_email(subject: str, body: str, recipient_email: str):
     """Sends an email using the system's 'mail' command."""
@@ -309,23 +302,27 @@ def send_email(subject: str, body: str, recipient_email: str):
         command = ['mail', '-s', subject, recipient_email]
         subprocess.run(command, input=body.encode('utf-8'), capture_output=True, check=True)
         log_message(f"Email sent to {recipient_email} with subject '{subject}'.")
+    except FileNotFoundError:
+        log_message("CRITICAL: 'mail' command not found. Cannot send email notification.")
     except Exception as e:
         log_message(f"An error occurred while sending email: {e}")
 
-def post_to_bluesky(message: str, test_mode: bool = False):
-    """Posts a message to a Blue Sky account."""
+def post_to_bluesky(message: str, test_mode: bool = False, reply_to=None):
+    """Posts a message to a Blue Sky account, optionally as a reply."""
     if not BLUESKY_HANDLE or not BLUESKY_APP_PASSWORD:
         log_message("Bluesky credentials not set. Skipping post.")
-        return
+        return None
     if test_mode:
         message = f"[TEST]\n{message}"
     log_message(f"Bluesky Post: {message}")
     try:
         session = BskySession(BLUESKY_HANDLE, BLUESKY_APP_PASSWORD)
-        post_text(session, message)
+        post_ref = post_text(session, message, reply_to=reply_to)
         log_message(f"Posted to Bluesky successfully.")
+        return post_ref
     except Exception as e:
         log_message(f"Error posting to Bluesky: {e}")
+        return None
 
 def calculate_flight_metrics(lat1: float, lon1: float, lat2: float, lon2: float, fuel_burn_rate: float) -> dict:
     """Calculates flight distance, fuel, and CO2 emissions using a specific fuel burn rate."""
@@ -342,6 +339,7 @@ def calculate_flight_metrics(lat1: float, lon1: float, lat2: float, lon2: float,
     fuel_gallons = distance_nm * fuel_burn_rate
     co2_lbs = fuel_gallons * JET_FUEL_CO2_LBS_PER_GALLON
     co2_tons = co2_lbs / LBS_PER_METRIC_TON
+
     equivalent_car_miles = 0.0
     if CO2_TONS_PER_AVG_CAR_MILE > 0:
         equivalent_car_miles = co2_tons / CO2_TONS_PER_AVG_CAR_MILE
@@ -353,13 +351,27 @@ def calculate_flight_metrics(lat1: float, lon1: float, lat2: float, lon2: float,
         'equivalent_car_miles': round(equivalent_car_miles)
     }
 
+def validate_coordinates(lat, lon):
+    """Checks if latitude and longitude values are physically possible."""
+    return (lat is not None and lon is not None and
+            -90 <= lat <= 90 and -180 <= lon <= 180)
+
+def validate_config():
+    """Checks that all critical environment variables are set before the script runs."""
+    required_vars = ['AIRCRAFT_FLEET', 'BLUESKY_HANDLE', 'BLUESKY_APP_PASSWORD']
+    missing = [var for var in required_vars if not os.getenv(var)]
+    if missing:
+        log_message(f"CRITICAL: Missing required environment variables: {missing}")
+        return False
+    return True
+
 # --- Main Processing Logic ---
 def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = None, test_mode: bool = False):
     """Processes a single aircraft for status changes."""
     icao_hex = aircraft_details['icao']
     owner_name = aircraft_details['owner']
     fuel_burn_rate = aircraft_details['fuel_burn']
-    
+
     log_prefix = f"[{owner_name} / {icao_hex}]"
     log_message(f"--- Processing aircraft: {owner_name} ({icao_hex}) ---")
     plane_state_data = get_current_state_for_plane(icao_hex, all_states)
@@ -368,103 +380,141 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
     last_lat = plane_state_data["last_lat"]
     last_lon = plane_state_data["last_lon"]
     last_change_time = plane_state_data["last_change_time"]
+    last_seen_time = plane_state_data["last_seen_time"]
     last_takeoff_location = plane_state_data["last_takeoff_location_name"]
-    last_idle_notification_time = plane_state_data["last_idle_notification_time"]
+    takeoff_lat = plane_state_data.get('takeoff_lat')
+    takeoff_lon = plane_state_data.get('takeoff_lon')
 
     current_utc_dt = datetime.datetime.now(pytz.UTC)
     current_time_timestamp = current_utc_dt.timestamp()
     time_since_last_change = current_time_timestamp - last_change_time
-    track_link = f"Track: https://globe.adsb.fi/?icao={icao_hex.lower()}"
+    time_since_last_seen = current_time_timestamp - last_seen_time
 
     log_message(f"{log_prefix} Current state: {current_state}. Time since last change: {time_since_last_change:.1f}s")
     plane_data = get_plane_data(icao_hex, spoof_data=spoof_data)
-    
+
     if not plane_data:
         log_message(f"{log_prefix} No plane data received from APIs.")
-        if current_state == "landed":
-            start_time_for_idle_check = last_idle_notification_time or last_change_time
-            if not start_time_for_idle_check:
-                start_time_for_idle_check = current_time_timestamp
-                plane_state_data["last_change_time"] = start_time_for_idle_check
-                set_current_state_for_plane(icao_hex, owner_name, all_states, plane_state_data)
-            
-            time_since_idle_event = current_time_timestamp - start_time_for_idle_check
+        if current_state == "flying" and (time_since_last_seen < OFFLINE_THRESHOLD):
+            log_message(f"{log_prefix} Plane was flying and seen recently. Assuming it has landed.")
+            landing_location = get_location_name(last_lat, last_lon)
+            log_message(f"{log_prefix} LANDING (assumed from no data) detected in {landing_location}")
 
-            if time_since_idle_event >= IDLE_NOTIFICATION_THRESHOLD_SECONDS:
-                log_message(f"{log_prefix} Plane has been idle for over {IDLE_NOTIFICATION_THRESHOLD_HOURS} hours. Sending notification.")
-                idle_location = get_location_name(last_lat, last_lon)
-                aircraft_name_idle = f"The **{owner_name}** aircraft ({icao_hex.upper()})"
-                idle_message = (
-                    f"✈️ {aircraft_name_idle} has been idle on the ground at **{idle_location}** for over {IDLE_NOTIFICATION_THRESHOLD_HOURS} hours.\n\n"
-                    f"{track_link}"
-                )
-                post_to_bluesky(idle_message, test_mode=test_mode)
-                send_email(f"Plane Tracker: Idle Alert for {owner_name}!", idle_message, RECIPIENT_EMAIL)
-                plane_state_data["last_idle_notification_time"] = current_time_timestamp
-                set_current_state_for_plane(icao_hex, owner_name, all_states, plane_state_data)
-            else:
-                log_message(f"{log_prefix} No plane data, and plane was already landed, but not yet time for another idle notification.")
-        return
-
-    aircraft_name = get_aircraft_display_name(plane_data, icao_hex, owner_name)
-    alt = plane_data.get("alt_baro")
-    gs = plane_data.get("gs")
-    lat = plane_data.get("lat")
-    lon = plane_data.get("lon")
-    is_flying = (alt is not None and alt > ALTITUDE_THRESHOLD) or (gs is not None and gs > GROUND_SPEED_THRESHOLD)
-    log_message(f"{log_prefix} API data: alt_baro={alt}, gs={gs}, lat={lat}, lon={lon}")
-    log_message(f"{log_prefix} Detected is_flying={is_flying}")
-
-    # --- State Change Logic ---
-    state_changed = (is_flying and current_state == "landed") or (not is_flying and current_state == "flying")
-
-    if state_changed:
-        if time_since_last_change < MIN_STATE_CHANGE_TIME and not test_mode:
-            log_message(f"{log_prefix} State changed, but minimum time threshold not met ({MIN_STATE_CHANGE_TIME}s). Skipping post to prevent flapping.")
-            return
-
-        # TAKEOFF
-        if is_flying:
-            takeoff_location = get_location_name(last_lat, last_lon) if last_lat and last_lon else "an unknown location"
-            log_message(f"{log_prefix} TAKEOFF detected from {takeoff_location}")
-
-            bluesky_takeoff_message = (
-                f"✈️ {aircraft_name} has taken off from **{takeoff_location}**.\n"
-                f"📍 {get_Maps_link(lat, lon)}\n"
-                f"{track_link}"
-            )
-            post_to_bluesky(bluesky_takeoff_message, test_mode=test_mode)
-            
-            new_state = { "state": "flying", "last_lat": lat, "last_lon": lon, "last_change_time": current_time_timestamp, "last_takeoff_location_name": takeoff_location, "last_idle_notification_time": 0 }
-            set_current_state_for_plane(icao_hex, owner_name, all_states, new_state)
-        
-        # LANDING
-        else:
-            landing_location = get_location_name(lat, lon)
-            log_message(f"{log_prefix} LANDING detected in {landing_location}")
+            utc_time_str, local_time_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon)
+            timestamp_line = f"⏰ {local_time_str} / {utc_time_str}"
+            gps_line = f"📍 ({last_lat:.4f}, {last_lon:.4f})"
+            aircraft_display = get_aircraft_display_name(plane_data, icao_hex, owner_name)
 
             bluesky_landing_message_1 = (
-                f"🛬 {aircraft_name} has landed in **{landing_location}**.\n"
-                f"📍 {get_Maps_link(lat, lon)}\n"
-                f"{track_link}"
+                f"🛬 {aircraft_display} has landed in **{landing_location}**.\n"
+                f"{timestamp_line}\n"
+                f"{gps_line}"
             )
             post_to_bluesky(bluesky_landing_message_1, test_mode=test_mode)
 
             if last_takeoff_location:
-                flight_metrics = calculate_flight_metrics(last_lat, last_lon, lat, lon, fuel_burn_rate)
+                metrics = calculate_flight_metrics(takeoff_lat, takeoff_lon, last_lat, last_lon, fuel_burn_rate)
+                plane_state_data['monthly_distance'] += metrics.get('distance_nm', 0)
+                plane_state_data['monthly_co2'] += metrics.get('co2_tons', 0)
+                plane_state_data['monthly_car_miles'] += metrics.get('equivalent_car_miles', 0)
+
                 bluesky_landing_message_2 = (
                     f"📊 **Flight Summary for {owner_name} jet:**\n"
                     f"• **Route:** {last_takeoff_location} to {landing_location}\n"
-                    f"• **Distance:** ~{flight_metrics['distance_nm']:.0f} nautical miles\n"
-                    f"• **CO₂ Emissions:** ~{flight_metrics['co2_tons']:.1f} tons\n"
-                    f"• **Equivalent to:** ~{flight_metrics['equivalent_car_miles']:,} miles driven by an average car."
+                    f"• **Distance:** ~{metrics.get('distance_nm', 0):.0f} nautical miles\n"
+                    f"• **CO₂ Emissions:** ~{metrics.get('co2_tons', 0):.1f} tons\n"
+                    f"• **Equivalent to:** ~{metrics.get('equivalent_car_miles', 0):,} miles driven by an average car."
                 )
                 post_to_bluesky(bluesky_landing_message_2, test_mode=test_mode)
 
-            new_state = { "state": "landed", "last_lat": lat, "last_lon": lon, "last_change_time": current_time_timestamp, "last_takeoff_location_name": None, "last_idle_notification_time": 0 }
-            set_current_state_for_plane(icao_hex, owner_name, all_states, new_state)
-    
-    # If no state change, but plane is flying, update its last known coordinates
+            plane_state_data.update({
+                "state": "landed", "last_lat": last_lat, "last_lon": last_lon,
+                "last_change_time": current_time_timestamp, "last_takeoff_location_name": None,
+                "takeoff_lat": None, "takeoff_lon": None
+            })
+            set_current_state_for_plane(icao_hex, owner_name, all_states, plane_state_data)
+        elif current_state == "landed":
+            log_message(f"{log_prefix} No plane data, and plane was already landed. No new action taken.")
+        return
+
+    plane_state_data['last_seen_time'] = current_time_timestamp
+
+    lat, lon = plane_data.get("lat"), plane_data.get("lon")
+    if not validate_coordinates(lat, lon):
+        log_message(f"{log_prefix} Invalid coordinates received from API: lat={lat}, lon={lon}. Skipping processing for this cycle.")
+        return
+
+    try:
+        alt = plane_data.get("alt_baro")
+        gs = plane_data.get("gs")
+        is_flying = (int(alt) > ALTITUDE_THRESHOLD if alt != "ground" else False) or (gs is not None and float(gs) > GROUND_SPEED_THRESHOLD)
+    except (ValueError, TypeError):
+        is_flying = False
+
+    log_message(f"{log_prefix} API data: alt_baro={alt}, gs={gs}, lat={lat}, lon={lon}")
+    log_message(f"{log_prefix} Determined flight status: is_flying={is_flying}")
+
+    state_changed = (is_flying and current_state == "landed") or (not is_flying and current_state == "flying")
+
+    if state_changed:
+        if time_since_last_change < MIN_STATE_CHANGE_TIME and not test_mode:
+            log_message(f"{log_prefix} State changed, but flapping threshold not met. Skipping post.")
+            return
+
+        aircraft_display = get_aircraft_display_name(plane_data, icao_hex, owner_name)
+        if is_flying:
+            location = get_location_name(last_lat, last_lon) or "an unknown location"
+            log_message(f"{log_prefix} TAKEOFF detected from {location}")
+            
+            utc_time_str, local_time_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon)
+            
+            post_to_bluesky(
+                f"✈️ {aircraft_display} has taken off from **{location}**.\n"
+                f"⏰ {local_time_str} / {utc_time_str}\n"
+                f"📍 ({last_lat:.4f}, {last_lon:.4f})\n"
+                f"Track: https://globe.adsb.fi/?icao={icao_hex.lower()}",
+                test_mode=test_mode
+            )
+            
+            plane_state_data.update({
+                "state": "flying", "last_lat": lat, "last_lon": lon,
+                "takeoff_lat": last_lat, "takeoff_lon": last_lon,
+                "last_change_time": current_time_timestamp, "last_takeoff_location_name": location
+            })
+        else: # Plane is landing
+            location = get_location_name(lat, lon) or "an unknown location"
+            log_message(f"{log_prefix} LANDING detected in {location}")
+
+            utc_time_str, local_time_str = format_full_time_for_location(current_utc_dt, lat, lon)
+            
+            post_to_bluesky(
+                f"🛬 {aircraft_display} has landed in **{location}**.\n"
+                f"⏰ {local_time_str} / {utc_time_str}\n"
+                f"📍 ({lat:.4f}, {lon:.4f})",
+                test_mode=test_mode
+            )
+
+            if last_takeoff_location:
+                metrics = calculate_flight_metrics(takeoff_lat, takeoff_lon, lat, lon, fuel_burn_rate)
+                plane_state_data['monthly_distance'] += metrics.get('distance_nm', 0)
+                plane_state_data['monthly_co2'] += metrics.get('co2_tons', 0)
+                plane_state_data['monthly_car_miles'] += metrics.get('equivalent_car_miles', 0)
+                
+                post_to_bluesky(
+                    f"📊 **Flight Summary for {owner_name} jet:**\n"
+                    f"• **Route:** {last_takeoff_location} to {location}\n"
+                    f"• **Distance:** ~{metrics.get('distance_nm', 0):.0f} nautical miles\n"
+                    f"• **CO₂ Emissions:** ~{metrics.get('co2_tons', 0):.1f} tons\n"
+                    f"• **Equivalent to:** ~{metrics.get('equivalent_car_miles', 0):,} miles driven by an average car.",
+                    test_mode=test_mode
+                )
+            
+            plane_state_data.update({
+                "state": "landed", "last_lat": lat, "last_lon": lon,
+                "last_change_time": current_time_timestamp, "last_takeoff_location_name": None
+            })
+
+        set_current_state_for_plane(icao_hex, owner_name, all_states, plane_state_data)
     elif is_flying and current_state == "flying":
         log_message(f"{log_prefix} No change in plane status (still flying).")
         plane_state_data["last_lat"] = lat
@@ -476,46 +526,132 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
 def parse_fleet_config(config_str: str) -> list:
     """Parses the semi-colon delimited fleet config string from the .env file."""
     fleet = []
-    if not config_str:
-        return fleet
-    
-    # Use a semicolon as the main delimiter between aircraft records
-    records = config_str.strip().split(';')
-    for record in records:
-        record = record.strip()
-        if not record:
-            continue
+    if not config_str: return []
+    for record in config_str.strip().split(';'):
+        if not record.strip(): continue
         try:
-            # Use the csv module on each individual record to handle quoted names
-            reader = csv.reader([record], quotechar='"', delimiter=',', quoting=csv.QUOTE_MINIMAL, skipinitialspace=True)
-            parts = next(reader)
-
-            if len(parts) != 3:
-                log_message(f"CRITICAL: Incorrect number of parts in fleet config record: '{record}'")
-                continue
-            
-            icao = parts[0]
-            owner = parts[1] # The csv module handles un-quoting
-            fuel_burn = float(parts[2])
-            fleet.append({'icao': icao, 'owner': owner, 'fuel_burn': fuel_burn})
+            parts = next(csv.reader([record], quotechar='"', delimiter=',', skipinitialspace=True))
+            if len(parts) == 3:
+                fleet.append({'icao': parts[0].lower(), 'owner': parts[1], 'fuel_burn': float(parts[2])})
+            else:
+                log_message(f"CRITICAL: Incorrect parts in fleet record: '{record}'")
         except (IndexError, ValueError, StopIteration) as e:
-            log_message(f"CRITICAL: Could not parse fleet config record: '{record}'. Error: {e}")
+            log_message(f"CRITICAL: Could not parse fleet record: '{record}'. Error: {e}")
     return fleet
+
+# --- NEW: Replaces the old calendar-day logic ---
+def post_daily_stationary_report(all_states: dict, aircraft_fleet: list, test_mode: bool = False):
+    """
+    Checks for planes that have been stationary for more than 24 hours
+    and posts a single summary report. Runs only once per day.
+    """
+    log_message("--- Checking for Daily Stationary Report ---")
+    local_tz = pytz.timezone(DEFAULT_TIMEZONE)
+    today_str = datetime.datetime.now(local_tz).strftime('%Y-%m-%d')
+    lock_file_path = os.path.join(LOCK_FILE_DIR, f"daily_report_sent_{today_str}.lock")
+
+    if os.path.exists(lock_file_path):
+        log_message("Daily stationary report has already been sent today. Skipping.")
+        return # Exit if the report for today has already been sent
+
+    stationary_aircraft_names = []
+    current_time_ts = datetime.datetime.now(pytz.UTC).timestamp()
+    SECONDS_IN_24_HOURS = 24 * 60 * 60
+
+    # Create a quick lookup for owner names from the fleet config
+    fleet_info = {ac['icao']: ac['owner'] for ac in aircraft_fleet}
+
+    for icao, state_data in all_states.items():
+        if icao == 'global_state':
+            continue
+
+        if state_data.get("state") == "landed":
+            time_since_change = current_time_ts - state_data.get("last_change_time", 0)
+            if time_since_change > SECONDS_IN_24_HOURS:
+                owner_name = fleet_info.get(icao, icao.upper())
+                stationary_aircraft_names.append(owner_name)
+
+    if stationary_aircraft_names:
+        log_message(f"Found {len(stationary_aircraft_names)} stationary aircraft. Posting summary.")
+        # Sort for consistent post formatting
+        stationary_aircraft_names.sort()
+        
+        message = "The following aircraft have not flown in the last 24 hours:\n\n"
+        message += "\n".join([f"• {name}" for name in stationary_aircraft_names])
+        
+        post_to_bluesky(message, test_mode=test_mode)
+    else:
+        log_message("No aircraft have been stationary for over 24 hours. No report needed.")
+
+    # Create the lock file to prevent this function from running again today
+    try:
+        with open(lock_file_path, 'w') as f:
+            f.write(f"Report sent at {datetime.datetime.now(local_tz).isoformat()}")
+        log_message(f"Created daily report lock file: {lock_file_path}")
+    except Exception as e:
+        log_message(f"CRITICAL: Failed to create daily lock file: {e}")
+
+
+def handle_monthly_summary(all_states: dict, aircraft_fleet: list, test_mode: bool = False):
+    """Checks if a new month has started, posts a summary, and resets monthly totals."""
+    now = datetime.datetime.now(pytz.UTC)
+    current_month_str = now.strftime('%Y-%m')
+    global_state = all_states.get('global_state', {})
+
+    if global_state.get('last_summary_month') == current_month_str:
+        return
+
+    if last_summary_month := global_state.get('last_summary_month'):
+        summary_lines = []
+        fleet_info = {ac['icao']: ac['owner'] for ac in aircraft_fleet}
+        
+        for icao, state_data in all_states.items():
+            if icao == 'global_state' or not state_data.get('monthly_distance', 0) > 0: continue
+            owner = fleet_info.get(icao, icao)
+            dist = state_data.get('monthly_distance', 0)
+            co2 = state_data.get('monthly_co2', 0)
+            car_miles = state_data.get('monthly_car_miles', 0)
+            summary_lines.append(f"• **{owner}**: ~{dist:,.0f} nm, ~{co2:,.1f} tons CO₂, ~{car_miles:,.0f} car miles")
+        
+        if summary_lines:
+            header = f"📊 Monthly Flight Summary for {datetime.datetime.strptime(last_summary_month, '%Y-%m').strftime('%B %Y')}:"
+            if root_post := post_to_bluesky(header, test_mode=test_mode):
+                parent_post = root_post
+                for line in summary_lines:
+                    if reply_post := post_to_bluesky(line, test_mode=test_mode, reply_to=parent_post):
+                        parent_post = reply_post
+
+        for icao in all_states:
+            if icao != 'global_state':
+                all_states[icao].update({'monthly_distance': 0.0, 'monthly_co2': 0.0, 'monthly_car_miles': 0.0})
+        log_message("Monthly flight summaries have been reset.")
+        
+    global_state['last_summary_month'] = current_month_str
+    all_states['global_state'] = global_state
 
 def main():
     """Main function to run the aircraft tracker for all configured planes."""
     log_message("--- Main script execution started ---")
 
-    if not AIRCRAFT_FLEET_STR:
-        log_message("CRITICAL: AIRCRAFT_FLEET not set in .env file. Exiting.")
-        return
+    if not validate_config(): return
 
     aircraft_fleet = parse_fleet_config(AIRCRAFT_FLEET_STR)
     if not aircraft_fleet:
-        log_message("CRITICAL: AIRCRAFT_FLEET is set but could not be parsed or is empty. Exiting.")
+        log_message("CRITICAL: AIRCRAFT_FLEET is empty or could not be parsed. Exiting.")
         return
 
     all_states = load_all_states()
+    
+    # NEW: Time-based trigger for the daily report
+    local_tz = pytz.timezone(DEFAULT_TIMEZONE)
+    local_now = datetime.datetime.now(local_tz)
+    
+    # At 12:01 AM local time, run the daily stationary report
+    if local_now.hour == 0 and local_now.minute == 1:
+        post_daily_stationary_report(all_states, aircraft_fleet)
+    
+    # The rest of the script runs every time, regardless of the daily report
+    handle_monthly_summary(all_states, aircraft_fleet)
 
     for aircraft in aircraft_fleet:
         try:
@@ -523,7 +659,7 @@ def main():
         except Exception as e:
             log_message(f"CRITICAL ERROR processing {aircraft['owner']} ({aircraft['icao']}): {e}")
             send_email(f"Plane Tracker CRITICAL ERROR for {aircraft['owner']}", f"An unhandled exception occurred: {e}", RECIPIENT_EMAIL)
-    
+
     save_all_states(all_states)
     log_message("--- Main script execution finished ---")
 

@@ -12,7 +12,7 @@ The goal of this project is to provide public transparency into the flight activ
 - **Automatic Event Posting:** Connects to the Blue Sky API to post updates when a plane takes off or lands.
 - **Flight Summaries:** After a plane lands, it calculates and posts a summary including the estimated flight distance, fuel consumption, and CO₂ emissions.
 - **Custom Metrics:** Uses per-aircraft fuel burn rates, configured by the user, for more accurate environmental impact estimates.
-- **Idle Alerts:** Posts a notification if a plane has been on the ground at a single location for a configurable amount of time (e.g., 12 hours).
+- **Idle Alerts:** Posts a notification if a plane has been on the ground at a single location for a configurable amount of time (e.g., 24 hours).
 - **Robust State Management:** It maintains a `plane_states.json` file to remember the last known state (flying/landed, location, etc.) of each aircraft. This prevents duplicate posts and ensures that flight summaries are calculated correctly.
 - **API Failover:** It uses a secondary flight data API if the primary one is unavailable, making the script more reliable.
 - **Detailed Logging:** Keeps a running `plane_tracker.log` file of all actions, API calls, and errors for easy debugging.
@@ -85,7 +85,7 @@ IDLE_NOTIFICATION_THRESHOLD_HOURS=12
 
 #### Configuration Details
 
--   **`AIRCRAFT_FLEET`**: This is the most important variable. It's a single line containing all the aircraft to track, separated by semicolons (`;`).
+-   **`AIRCRAFT_FLEET`**: This is the most important variable. It's a single line containing all the aircraft to track, separated by semicolons (`;`). Add as many planes as you like, but the more planes you add the more API calls you make and the slower the script runs.
     -   **Format:** `ICAO_HEX,"Owner Name",Fuel_Burn_Gal_per_NM`
     -   **ICAO Hex Code:** The unique 6-character code for the aircraft. You can find this on sites like the [FAA Registry](https://registry.faa.gov/aircraftinquiry/Search/NNumberInquiry) by searching for the aircraft's tail number (N-Number).
     -   **Owner Name:** The name you want to display in posts. It **must be in double quotes**. If the name itself contains an apostrophe, use two apostrophes (e.g., `"Dick''s Sporting Goods"`).
@@ -117,10 +117,10 @@ For continuous, automatic tracking, set up a cron job. This example runs the scr
 2.  Add the following line. **You must use the full, absolute paths** to your Python executable (inside your `venv`) and to your script.
 
     ```crontab
-    */2 * * * * /home/your_user/plane_tracker_project/venv/bin/python /home/your_user/plane_tracker_project/track_plane.py >> /home/your_user/plane_tracker_project/cron.log 2>&1
+    */2 * * * * cd /home/your_user/plane_tracker_project/ && /home/your_user/plane_tracker_project/venv/bin/python3 track_plane.py >> /home/your_user/plane_tracker_project/cron.log 2>&1
     ```
 
 This command will:
-- Run the script every two minutes.
+- Run the script every two minutes.  Change this to whatever you want it to be.  The more it runs, the more granular the data it gathers at the expense of data used and API calls.
 - Use the correct Python interpreter from your virtual environment.
 - Append all output (both standard and error messages) to a `cron.log` file in your project directory for easy debugging.

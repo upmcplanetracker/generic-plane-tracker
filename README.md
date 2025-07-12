@@ -12,7 +12,7 @@ The goal of this project is to provide public transparency into the flight activ
 - **Automatic Event Posting:** Connects to the Blue Sky API to post updates when a plane takes off or lands.
 - **Flight Summaries:** After a plane lands, it calculates and posts a summary including the estimated flight distance, fuel consumption, and CO₂ emissions.
 - **Custom Metrics:** Uses per-aircraft fuel burn rates, configured by the user, for more accurate environmental impact estimates.
-- **Idle Alerts:** Posts a notification if a plane has been on the ground at a single location for a configurable amount of time (e.g., 24 hours).
+- **Idle Alerts:** Posts a notification if a plane has been on the ground at a single location every day at 12:01 am local time (where the script is run).
 - **Robust State Management:** It maintains a `plane_states.json` file to remember the last known state (flying/landed, location, etc.) of each aircraft. This prevents duplicate posts and ensures that flight summaries are calculated correctly.
 - **API Failover:** It uses a secondary flight data API if the primary one is unavailable, making the script more reliable.
 - **Detailed Logging:** Keeps a running `plane_tracker.log` file of all actions, API calls, and errors for easy debugging.
@@ -80,7 +80,7 @@ GEOLOCATOR_EMAIL="your-personal-email@example.com"
 ALTITUDE_THRESHOLD=500
 GROUND_SPEED_THRESHOLD=50
 MIN_STATE_CHANGE_TIME=300
-IDLE_NOTIFICATION_THRESHOLD_HOURS=12
+IDLE_NOTIFICATION_THRESHOLD_HOURS=12 #currently unused as I changed it to run at 12:01 am every day local time
 ```
 
 #### Configuration Details

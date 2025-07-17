@@ -87,7 +87,7 @@ Add to your crontab for regular monitoring:
 # Run every 10 minutes
 */10 * * * * /usr/bin/python3 /path/to/track_plane.py
 ```
-Each plane tracked counts as one call per script run. Be careful as API free calls are very limited.
+Each plane tracked counts as one API call per script run. Be careful as API free calls are very limited.
 
 ## File Structure
 

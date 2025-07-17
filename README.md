@@ -39,7 +39,7 @@ Create a `.env` file in the same directory as the script:
 ```env
 # Aircraft Fleet Configuration (semicolon-separated)
 # Format: "icao_hex,owner_name,fuel_burn_rate_per_nm"
-AIRCRAFT_FLEET="a12345,Elon Musk,0.97;b67890,Jeff Bezos,1.2"
+AIRCRAFT_FLEET="a12345,Elmo Mush,0.97;b67890,Geoff Bozos,1.2"
 
 # API Keys
 ADSBEXCHANGE_API_KEY=your_rapidapi_key_here
@@ -87,6 +87,7 @@ Add to your crontab for regular monitoring:
 # Run every 10 minutes
 */10 * * * * /usr/bin/python3 /path/to/track_plane.py
 ```
+Each plane tracked counts as one call per script run. Be careful as API free calls are very limited.
 
 ## File Structure
 
@@ -132,7 +133,7 @@ plane_tracker/
 
 ### Takeoff Notification
 ```
-✈️ **Elon Musk** (A12345) has taken off from **Austin, Texas, United States**.
+✈️ **Elmo Mush** (A12345) has taken off from **Austin, Texas, United States**.
 ⏰ 2024-01-15, 10:30 AM CST / 2024-01-15, 16:30 UTC
 📍 (30.1945, -97.6699)
 Track: https://globe.adsb.fi/?icao=a12345
@@ -140,14 +141,14 @@ Track: https://globe.adsb.fi/?icao=a12345
 
 ### Landing Notification
 ```
-🛬 **Elon Musk** (A12345) has landed in **Los Angeles, California, United States**.
+🛬 **Elmo Mush** (A12345) has landed in **Los Angeles, California, United States**.
 ⏰ 2024-01-15, 01:45 PM PST / 2024-01-15, 21:45 UTC
 📍 (34.0522, -118.2437)
 ```
 
 ### Flight Summary
 ```
-📊 **Flight Summary for Elon Musk jet:**
+📊 **Flight Summary for Elmo Mush jet:**
 • **Route:** Austin, Texas, United States to Los Angeles, California, United States
 • **Distance:** ~1,200 nautical miles
 • **CO₂ Emissions:** ~24.5 tons
@@ -194,4 +195,4 @@ The script includes comprehensive error handling for:
 
 ## License
 
-This project is provided as-is for educational and personal use. Please respect API terms of service and privacy considerations when tracking aircraft.
+This project is provided as-is for educational and personal use. Please respect API terms of service and privacy considerations when tracking aircraft. See LICENSE.md

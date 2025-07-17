@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import requests
 import os
 import datetime
@@ -20,19 +21,24 @@ load_dotenv()
 # --- Configuration (from .env file) ---
 AIRCRAFT_FLEET_STR = os.getenv("AIRCRAFT_FLEET")
 
+# ADSBexchange API Key from RapidAPI
+ADSBEXCHANGE_API_KEY = os.getenv("ADSBEXCHANGE_API_KEY")
+
+# Blue Sky Credentials
 BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
 BLUESKY_APP_PASSWORD = os.getenv("BLUESKY_APP_PASSWORD")
+
+# Other Configurations
 RECIPIENT_EMAIL = os.getenv("RECIPIENT_EMAIL")
 GEOLOCATOR_EMAIL = os.getenv("GEOLOCATOR_EMAIL", "plane-tracker@example.com")
-# NEW: Configurable timezone for logs
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "America/New_York")
 
 
 # --- Script Behavior & Thresholds ---
 ALTITUDE_THRESHOLD = int(os.getenv("ALTITUDE_THRESHOLD", "500"))
 GROUND_SPEED_THRESHOLD = int(os.getenv("GROUND_SPEED_THRESHOLD", "50"))
-MIN_STATE_CHANGE_TIME = int(os.getenv("MIN_STATE_CHANGE_TIME", "300"))
-LOG_RETENTION_HOURS = int(os.getenv("LOG_RETENTION_HOURS", "6"))
+MIN_STATE_CHANGE_TIME = int(os.getenv("MIN_STATE_CHANGE_TIME", "900")) # Changed to 15 minutes
+LOG_RETENTION_HOURS = int(os.getenv("LOG_RETENTION_HOURS", "36"))
 RETRY_COUNT = int(os.getenv("RETRY_COUNT", "2"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "2"))
 OFFLINE_THRESHOLD = 900 # 15 minutes
@@ -47,8 +53,7 @@ CO2_TONS_PER_AVG_CAR_MILE = float(os.getenv("CO2_TONS_PER_AVG_CAR_MILE", "0.0004
 EARTH_RADIUS_NM = 3440.065
 
 # --- API Endpoints ---
-ADSB_LOL_API_URL = "https://re-api.adsb.lol/v2/aircraft.json"
-ADSB_FI_API_URL = "https://opendata.adsb.fi/api/v2/hex/{icao_hex}"
+ADSBEXCHANGE_API_URL = "https://adsbexchange-com1.p.rapidapi.com/v2/hex/"
 
 # --- Geocoding configuration ---
 GEOLOCATOR_USER_AGENT = f"PlaneTrackerApp/1.0 ({GEOLOCATOR_EMAIL})"
@@ -57,7 +62,6 @@ GEOLOCATOR_USER_AGENT = f"PlaneTrackerApp/1.0 ({GEOLOCATOR_EMAIL})"
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(SCRIPT_DIR, "plane_states.json")
 LOG_FILE = os.path.join(SCRIPT_DIR, "plane_tracker.log")
-# NEW: Define a directory for the lock file
 LOCK_FILE_DIR = SCRIPT_DIR
 
 
@@ -148,80 +152,42 @@ def format_full_time_for_location(utc_dt: datetime.datetime, latitude: float, lo
     return utc_time_str, local_time_str
 
 # --- Data Fetching Functions ---
-def _fetch_data_from_api(url: str, source_name: str, icao_hex: str, suppress_email_on_fail: bool = False) -> tuple[dict | None, bool, str | None]:
-    """Internal function to fetch data from a single API with retries."""
-    error_msg = None
-    for attempt in range(RETRY_COUNT + 1):
-        try:
-            if source_name == "adsb.lol":
-                params = {"find_hex": icao_hex}
-                response = requests.get(url, params=params, timeout=5)
-            else:
-                full_url = url.format(icao_hex=icao_hex)
-                response = requests.get(full_url, timeout=5)
-
-            response.raise_for_status()
-
-            data = response.json()
-            if data and 'aircraft' in data and data['aircraft']:
-                log_message(f"Successfully fetched data for {icao_hex} from {source_name}.", source_api=source_name)
-                return data['aircraft'][0], True, None
-            else:
-                log_message(f"No aircraft data found for ICAO {icao_hex} from {source_name}.", source_api=source_name)
-                return None, True, None
-        except requests.exceptions.Timeout:
-            error_msg = f"Timeout fetching data from {source_name}: Read timed out."
-        except requests.exceptions.HTTPError as e:
-            error_msg = f"HTTP Error fetching data from {source_name}: {e}"
-        except requests.RequestException as e:
-            error_msg = f"General Request Error fetching data from {source_name}: {e}"
-        except Exception as e:
-            error_msg = f"Unexpected error fetching data from {source_name}: {e}"
-
-        if attempt < RETRY_COUNT:
-            sleep(RETRY_DELAY)
-    
-    if not suppress_email_on_fail and error_msg:
-        email_subject = f"CRITICAL: Plane Tracker - {source_name.upper()} API Failure!"
-        email_body = f"The plane tracker script failed to fetch data from {source_name} after {RETRY_COUNT + 1} attempts.\n\nError: {error_msg}"
-        send_email(email_subject, email_body, RECIPIENT_EMAIL)
-
-    log_message(f"Failed to fetch data for {icao_hex} from {source_name} after {RETRY_COUNT + 1} attempts.", source_api=source_name)
-    return None, False, error_msg
-
 def get_plane_data(icao_hex: str, spoof_data: dict = None) -> dict:
-    """Fetches plane data from primary API, with a failover to a secondary API."""
+    """Fetches plane data from ADSBexchange API via RapidAPI, with retries and email alerts."""
     if spoof_data is not None:
         log_message(f"Using SPOOFED DATA for {icao_hex}: {spoof_data}")
         return spoof_data
 
-    plane_data_lol, lol_api_successful, lol_error_msg = _fetch_data_from_api(ADSB_LOL_API_URL, "adsb.lol", icao_hex, suppress_email_on_fail=True)
-    if plane_data_lol:
-        return plane_data_lol
+    headers = {
+        "x-rapidapi-host": "adsbexchange-com1.p.rapidapi.com",
+        "x-rapidapi-key": ADSBEXCHANGE_API_KEY
+    }
 
-    if not lol_api_successful:
-        log_message(f"ADSB.lol API call failed for {icao_hex}. Attempting to fetch data from ADSB.fi (failover).", source_api="adsb.fi")
-        plane_data_fi, fi_api_successful, fi_error_msg = _fetch_data_from_api(ADSB_FI_API_URL, "adsb.fi", icao_hex)
-        if plane_data_fi:
-            log_message(f"Data successfully retrieved for {icao_hex} from adsb.fi after ADSB.lol failure.", source_api="adsb.fi")
-            return plane_data_fi
-        else:
-            if not fi_api_successful:
-                log_message(f"ADSB.fi also failed for {icao_hex}. No plane data could be retrieved from any source.", source_api="none")
-                email_subject = f"CRITICAL: Plane Tracker - Both APIs Failed for {icao_hex}!"
-                email_body = (
-                    f"Your plane tracker script failed to retrieve data for {icao_hex} from both ADSB.lol and ADSB.fi.\n\n"
-                    f"ADSB.lol error: {lol_error_msg if lol_error_msg else 'No specific error message recorded.'}\n"
-                    f"ADSB.fi error: {fi_error_msg if fi_error_msg else 'No specific error message recorded.'}\n\n"
-                    f"Please check the log file for more details."
-                )
-                send_email(email_subject, email_body, RECIPIENT_EMAIL)
+    url = f"{ADSBEXCHANGE_API_URL}{icao_hex}/"
+
+    for attempt in range(RETRY_COUNT + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data and 'ac' in data and data['ac']:
+                log_message(f"Successfully fetched data for {icao_hex} from ADSBexchange.", source_api="ADSBexchange")
+                return data['ac'][0]
             else:
-                log_message(f"ADSB.fi responded successfully but found no aircraft data for {icao_hex}.", source_api="adsb.fi (no data)")
-    else:
-        log_message(f"ADSB.lol responded successfully but found no aircraft data for {icao_hex}. Not failing over.", source_api="adsb.lol (no data)")
+                log_message(f"No aircraft data found for ICAO {icao_hex} from ADSBexchange.", source_api="ADSBexchange")
+                return None
+        except requests.exceptions.RequestException as e:
+            log_message(f"ADSBexchange API call for {icao_hex} failed on attempt {attempt + 1}: {e}", source_api="ADSBexchange")
+            if attempt < RETRY_COUNT:
+                sleep(RETRY_DELAY)
+            else: # This is the final attempt
+                log_message(f"CRITICAL: All API requests to ADSBexchange failed for {icao_hex}.")
+                email_subject = f"Plane Tracker CRITICAL: ADSBexchange API Failure"
+                email_body = f"The script failed to get data for ICAO {icao_hex} from ADSBexchange after {RETRY_COUNT + 1} attempts.\n\nLast error: {e}"
+                send_email(email_subject, email_body, RECIPIENT_EMAIL)
 
     return None
+
 
 def get_location_name(latitude: float, longitude: float) -> str:
     """Converts coordinates into a human-readable location string."""
@@ -307,7 +273,7 @@ def send_email(subject: str, body: str, recipient_email: str):
     except Exception as e:
         log_message(f"An error occurred while sending email: {e}")
 
-def post_to_bluesky(message: str, test_mode: bool = False, reply_to=None):
+def post_to_bluesky(message: str, test_mode: bool = False):
     """Posts a message to a Blue Sky account, optionally as a reply."""
     if not BLUESKY_HANDLE or not BLUESKY_APP_PASSWORD:
         log_message("Bluesky credentials not set. Skipping post.")
@@ -317,7 +283,7 @@ def post_to_bluesky(message: str, test_mode: bool = False, reply_to=None):
     log_message(f"Bluesky Post: {message}")
     try:
         session = BskySession(BLUESKY_HANDLE, BLUESKY_APP_PASSWORD)
-        post_ref = post_text(session, message, reply_to=reply_to)
+        post_ref = post_text(session, message)
         log_message(f"Posted to Bluesky successfully.")
         return post_ref
     except Exception as e:
@@ -358,7 +324,7 @@ def validate_coordinates(lat, lon):
 
 def validate_config():
     """Checks that all critical environment variables are set before the script runs."""
-    required_vars = ['AIRCRAFT_FLEET', 'BLUESKY_HANDLE', 'BLUESKY_APP_PASSWORD']
+    required_vars = ['AIRCRAFT_FLEET', 'BLUESKY_HANDLE', 'BLUESKY_APP_PASSWORD', 'ADSBEXCHANGE_API_KEY']
     missing = [var for var in required_vars if not os.getenv(var)]
     if missing:
         log_message(f"CRITICAL: Missing required environment variables: {missing}")
@@ -465,9 +431,9 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
         if is_flying:
             location = get_location_name(last_lat, last_lon) or "an unknown location"
             log_message(f"{log_prefix} TAKEOFF detected from {location}")
-            
+
             utc_time_str, local_time_str = format_full_time_for_location(current_utc_dt, last_lat, last_lon)
-            
+
             post_to_bluesky(
                 f"✈️ {aircraft_display} has taken off from **{location}**.\n"
                 f"⏰ {local_time_str} / {utc_time_str}\n"
@@ -475,7 +441,7 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
                 f"Track: https://globe.adsb.fi/?icao={icao_hex.lower()}",
                 test_mode=test_mode
             )
-            
+
             plane_state_data.update({
                 "state": "flying", "last_lat": lat, "last_lon": lon,
                 "takeoff_lat": last_lat, "takeoff_lon": last_lon,
@@ -486,7 +452,7 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
             log_message(f"{log_prefix} LANDING detected in {location}")
 
             utc_time_str, local_time_str = format_full_time_for_location(current_utc_dt, lat, lon)
-            
+
             post_to_bluesky(
                 f"🛬 {aircraft_display} has landed in **{location}**.\n"
                 f"⏰ {local_time_str} / {utc_time_str}\n"
@@ -499,7 +465,7 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
                 plane_state_data['monthly_distance'] += metrics.get('distance_nm', 0)
                 plane_state_data['monthly_co2'] += metrics.get('co2_tons', 0)
                 plane_state_data['monthly_car_miles'] += metrics.get('equivalent_car_miles', 0)
-                
+
                 post_to_bluesky(
                     f"📊 **Flight Summary for {owner_name} jet:**\n"
                     f"• **Route:** {last_takeoff_location} to {location}\n"
@@ -508,7 +474,7 @@ def process_plane(aircraft_details: dict, all_states: dict, spoof_data: dict = N
                     f"• **Equivalent to:** ~{metrics.get('equivalent_car_miles', 0):,} miles driven by an average car.",
                     test_mode=test_mode
                 )
-            
+
             plane_state_data.update({
                 "state": "landed", "last_lat": lat, "last_lon": lon,
                 "last_change_time": current_time_timestamp, "last_takeoff_location_name": None
@@ -569,16 +535,16 @@ def post_daily_stationary_report(all_states: dict, aircraft_fleet: list, test_mo
             time_since_change = current_time_ts - state_data.get("last_change_time", 0)
             if time_since_change > SECONDS_IN_24_HOURS:
                 owner_name = fleet_info.get(icao, icao.upper())
-                stationary_aircraft_names.append(owner_name)
+                stationary_aircraft_names.append(f"**{owner_name}**")
 
     if stationary_aircraft_names:
         log_message(f"Found {len(stationary_aircraft_names)} stationary aircraft. Posting summary.")
         # Sort for consistent post formatting
         stationary_aircraft_names.sort()
-        
+
         message = "The following aircraft have not flown in the last 24 hours:\n\n"
         message += "\n".join([f"• {name}" for name in stationary_aircraft_names])
-        
+
         post_to_bluesky(message, test_mode=test_mode)
     else:
         log_message("No aircraft have been stationary for over 24 hours. No report needed.")
@@ -604,7 +570,7 @@ def handle_monthly_summary(all_states: dict, aircraft_fleet: list, test_mode: bo
     if last_summary_month := global_state.get('last_summary_month'):
         summary_lines = []
         fleet_info = {ac['icao']: ac['owner'] for ac in aircraft_fleet}
-        
+
         for icao, state_data in all_states.items():
             if icao == 'global_state' or not state_data.get('monthly_distance', 0) > 0: continue
             owner = fleet_info.get(icao, icao)
@@ -612,20 +578,20 @@ def handle_monthly_summary(all_states: dict, aircraft_fleet: list, test_mode: bo
             co2 = state_data.get('monthly_co2', 0)
             car_miles = state_data.get('monthly_car_miles', 0)
             summary_lines.append(f"• **{owner}**: ~{dist:,.0f} nm, ~{co2:,.1f} tons CO₂, ~{car_miles:,.0f} car miles")
-        
+
         if summary_lines:
             header = f"📊 Monthly Flight Summary for {datetime.datetime.strptime(last_summary_month, '%Y-%m').strftime('%B %Y')}:"
             if root_post := post_to_bluesky(header, test_mode=test_mode):
                 parent_post = root_post
                 for line in summary_lines:
-                    if reply_post := post_to_bluesky(line, test_mode=test_mode, reply_to=parent_post):
+                    if reply_post := post_to_bluesky(line, test_mode=test_mode):
                         parent_post = reply_post
 
         for icao in all_states:
             if icao != 'global_state':
                 all_states[icao].update({'monthly_distance': 0.0, 'monthly_co2': 0.0, 'monthly_car_miles': 0.0})
         log_message("Monthly flight summaries have been reset.")
-        
+
     global_state['last_summary_month'] = current_month_str
     all_states['global_state'] = global_state
 
@@ -641,15 +607,10 @@ def main():
         return
 
     all_states = load_all_states()
-    
-    # NEW: Time-based trigger for the daily report
-    local_tz = pytz.timezone(DEFAULT_TIMEZONE)
-    local_now = datetime.datetime.now(local_tz)
-    
-    # At 12:01 AM local time, run the daily stationary report
-    if local_now.hour == 0 and local_now.minute == 1:
-        post_daily_stationary_report(all_states, aircraft_fleet)
-    
+
+    # Afer 12:01 AM local time, run the daily stationary report
+    post_daily_stationary_report(all_states, aircraft_fleet)
+
     # The rest of the script runs every time, regardless of the daily report
     handle_monthly_summary(all_states, aircraft_fleet)
 
